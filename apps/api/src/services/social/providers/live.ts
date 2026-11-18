@@ -2,6 +2,7 @@ import { PlatformId, PLATFORMS } from '../platforms';
 import { AdapterError, SocialAdapter } from '../adapters';
 import { youtubeAdapter } from './youtube';
 import { tiktokAdapter } from './tiktok';
+import { facebookAdapter, instagramAdapter } from './meta';
 
 /**
  * Real platform adapters. These are stubs until the platform credentials are set:
@@ -39,6 +40,8 @@ export function liveConfigured(platform: PlatformId): boolean {
 export function liveAdapter(platform: PlatformId): SocialAdapter {
   if (platform === 'youtube' && liveConfigured('youtube')) return youtubeAdapter();
   if (platform === 'tiktok' && liveConfigured('tiktok')) return tiktokAdapter();
+  if (platform === 'facebook' && liveConfigured('facebook')) return facebookAdapter();
+  if (platform === 'instagram' && liveConfigured('instagram')) return instagramAdapter();
   const name = PLATFORMS[platform].name;
   const notReady = () =>
     new AdapterError(

@@ -52,7 +52,9 @@ export const PlannerPage = () => {
         const err = params.get('connect_error');
         if (!ok && !err)
             return;
-        if (ok)
+        if (ok === 'meta')
+            toast.success('Facebook & Instagram connected', params.get('channel') || undefined);
+        else if (ok)
             toast.success(`${PLATFORMS[ok]?.name || ok} connected`, params.get('channel') ? `Channel: ${params.get('channel')}` : undefined);
         else
             toast.error("Couldn't connect the account", err || undefined);

@@ -55,7 +55,8 @@ export const PlannerPage: React.FC = () => {
     const ok = params.get('connected');
     const err = params.get('connect_error');
     if (!ok && !err) return;
-    if (ok) toast.success(`${PLATFORMS[ok as PlatformId]?.name || ok} connected`, params.get('channel') ? `Channel: ${params.get('channel')}` : undefined);
+    if (ok === 'meta') toast.success('Facebook & Instagram connected', params.get('channel') || undefined);
+    else if (ok) toast.success(`${PLATFORMS[ok as PlatformId]?.name || ok} connected`, params.get('channel') ? `Channel: ${params.get('channel')}` : undefined);
     else toast.error("Couldn't connect the account", err || undefined);
     ['connected', 'connect_error', 'channel', 'tab'].forEach((k) => params.delete(k));
     window.history.replaceState(null, '', `${window.location.pathname}${params.toString() ? `?${params}` : ''}`);

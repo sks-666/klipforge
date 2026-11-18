@@ -14,6 +14,7 @@ import { probeVaultFile, mimeFor } from '../services/vault.service';
 import { getAdapter } from '../services/social/adapters';
 import { youtubeAdapter, youtubeAuthUrl, youtubeConfigured } from '../services/social/providers/youtube';
 import { pkcePair, tiktokAdapter, tiktokAuthUrl, tiktokConfigured } from '../services/social/providers/tiktok';
+import { metaAuthUrl, metaConfigured, metaConnect, MetaConnection } from '../services/social/providers/meta';
 import { normalizePlatform, PLATFORM_IDS, PLATFORMS, PlatformId } from '../services/social/platforms';
 import {
   assertQuota,
@@ -169,7 +170,8 @@ export async function plannerRoutes(app: FastifyInstance) {
       const body = z
         .object({ platform: z.enum(PLATFORM_IDS as [PlatformId, ...PlatformId[]]), mode: z.enum(['sandbox', 'live']).default('sandbox'), username: z.string().max(60).optional() })
         .parse(req.body);
-      if (body.mode === 'live' && isOAuth(body.platform)) return { redirect: oauthStartUrl(body.platform, req.user.workspaceId, req.user.userId, null) };
+      const op = oauthProvider(body.platform);
+      if (body.mode === 'live' && op) return { redirect: oauthStartUrl(op, req.user.workspaceId, req.user.userId, null) };
       const adapter = getAdapter(body.platform, body.mode);
       let res;
       try {
@@ -199,16 +201,44 @@ export async function plannerRoutes(app: FastifyInstance) {
     }
   });
 
-  // ── Real account sign-in (OAuth 2.0): YouTube and TikTok ─────────────────
+  // ── Real account sign-in (OAuth 2.0): YouTube, TikTok and Meta ────────────
   // start → platform consent screen → callback (through the web origin's /api proxy) → account saved.
   // TikTok also needs PKCE: its verifier stays here on the server (looked up by a one-time nonce).
-  type OAuthPlatform = 'youtube' | 'tiktok';
-  const OAUTH: Record<OAuthPlatform, { configured: () => boolean; adapter: () => ReturnType<typeof youtubeAdapter> }> = {
-    youtube: { configured: youtubeConfigured, adapter: youtubeAdapter },
-    tiktok: { configured: tiktokConfigured, adapter: tiktokAdapter },
+  // Meta is one Facebook Login for both Facebook and Instagram: the callback saves every Page the
+  // user shared and the Instagram account linked to each one.
+  type OAuthPlatform = 'youtube' | 'tiktok' | 'meta';
+  const OAUTH: Record<OAuthPlatform, { configured: () => boolean; name: string }> = {
+    youtube: { configured: youtubeConfigured, name: 'YouTube' },
+    tiktok: { configured: tiktokConfigured, name: 'TikTok' },
+    meta: { configured: metaConfigured, name: 'Facebook' },
   };
   const pkceVerifiers = new Map<string, { verifier: string; exp: number }>();
-  const isOAuth = (p: string): p is OAuthPlatform => p in OAUTH && OAUTH[p as OAuthPlatform].configured();
+  /** The sign-in provider for a platform (Facebook and Instagram share Meta's), when configured. */
+  const oauthProvider = (p: string): OAuthPlatform | null => {
+    const key = p === 'facebook' || p === 'instagram' ? 'meta' : p;
+    return key in OAUTH && OAUTH[key as OAuthPlatform].configured() ? (key as OAuthPlatform) : null;
+  };
+
+  async function saveLiveAccount(ws: string, platform: string, res: MetaConnection['result'], reuseId: string | null) {
+    const existing =
+      (reuseId && (await prisma.socialAccount.findFirst({ where: { id: reuseId, workspace_id: ws, platform } }))) ||
+      (await prisma.socialAccount.findFirst({ where: { workspace_id: ws, platform, mode: 'live', external_id: res.externalId } }));
+    const data = {
+      platform,
+      external_id: res.externalId,
+      username: res.username,
+      page: res.page || null,
+      profile_pic: res.avatarUrl || null,
+      token_enc: encryptSecret(res.accessToken),
+      refresh_enc: res.refreshToken ? encryptSecret(res.refreshToken) : existing?.refresh_enc || null,
+      expires_at: res.expiresAt || null,
+      status: 'active',
+      mode: 'live',
+      last_error: null,
+    };
+    if (existing) await prisma.socialAccount.update({ where: { id: existing.id }, data });
+    else await prisma.socialAccount.create({ data: { ...data, workspace_id: ws } });
+  }
 
   function oauthStartUrl(platform: OAuthPlatform, ws: string, uid: string, accountId: string | null): string {
     const nonce = crypto.randomBytes(16).toString('hex');
@@ -220,14 +250,16 @@ export async function plannerRoutes(app: FastifyInstance) {
       pkceVerifiers.set(nonce, { verifier, exp: now + 15 * 60_000 });
       return tiktokAuthUrl(state, challenge);
     }
+    if (platform === 'meta') return metaAuthUrl(state);
     return youtubeAuthUrl(state);
   }
 
   app.get('/api/v1/planner/oauth/:platform/start', { preHandler: [requireRole('editor')] }, async (req, reply) => {
     const { platform } = req.params as { platform: string };
-    if (!isOAuth(platform)) return reply.status(400).send({ code: 400, errMsg: `${platform} sign-in isn’t configured on the server.` });
+    const op = oauthProvider(platform);
+    if (!op) return reply.status(400).send({ code: 400, errMsg: `${platform} sign-in isn’t configured on the server.` });
     const { accountId } = (req.query || {}) as { accountId?: string };
-    return { url: oauthStartUrl(platform, req.user.workspaceId, req.user.userId, accountId || null) };
+    return { url: oauthStartUrl(op, req.user.workspaceId, req.user.userId, accountId || null) };
   });
 
   app.get('/api/v1/planner/oauth/:platform/callback', async (req, reply) => {
@@ -235,9 +267,9 @@ export async function plannerRoutes(app: FastifyInstance) {
     const q = req.query as { code?: string; state?: string; error?: string; error_description?: string };
     const back = (params: Record<string, string>) =>
       reply.code(302).header('Location', `/workspace?${new URLSearchParams({ tab: 'calendar', ...params })}`).send();
-    const name = platform === 'tiktok' ? 'TikTok' : 'YouTube';
+    const name = OAUTH[platform as OAuthPlatform]?.name || platform;
     if (q.error) return back({ connect_error: q.error === 'access_denied' ? `You cancelled the ${name} sign-in.` : `${name} said: ${q.error_description || q.error}` });
-    if (!isOAuth(platform)) return back({ connect_error: `${name} sign-in isn’t configured.` });
+    if (oauthProvider(platform) !== platform) return back({ connect_error: `${name} sign-in isn’t configured.` });
     let st: any;
     try {
       st = app.jwt.verify(String(q.state || ''));
@@ -252,25 +284,17 @@ export async function plannerRoutes(app: FastifyInstance) {
       if (!codeVerifier) return back({ connect_error: 'The sign-in link expired. Try connecting again.' });
     }
     try {
-      const res = await OAUTH[platform].adapter().connect({ mode: 'live', code: q.code, codeVerifier });
-      const existing =
-        (st.acc && (await prisma.socialAccount.findFirst({ where: { id: st.acc, workspace_id: st.ws } }))) ||
-        (await prisma.socialAccount.findFirst({ where: { workspace_id: st.ws, platform, mode: 'live', external_id: res.externalId } }));
-      const data = {
-        platform,
-        external_id: res.externalId,
-        username: res.username,
-        page: res.page || null,
-        profile_pic: res.avatarUrl || null,
-        token_enc: encryptSecret(res.accessToken),
-        refresh_enc: res.refreshToken ? encryptSecret(res.refreshToken) : existing?.refresh_enc || null,
-        expires_at: res.expiresAt || null,
-        status: 'active',
-        mode: 'live',
-        last_error: null,
-      };
-      if (existing) await prisma.socialAccount.update({ where: { id: existing.id }, data });
-      else await prisma.socialAccount.create({ data: { ...data, workspace_id: st.ws } });
+      if (platform === 'meta') {
+        // One sign-in can return several Pages and Instagram accounts; each is matched by its id,
+        // so reconnecting refreshes the same rows instead of replacing one with another.
+        const all = await metaConnect(q.code);
+        for (const c of all) await saveLiveAccount(st.ws, c.platform, c.result, null);
+        const names = all.map((c) => (c.platform === 'instagram' ? `Instagram ${c.result.username}` : `Facebook ${c.result.username}`));
+        return back({ connected: 'meta', channel: names.join(', ') });
+      }
+      const adapter = platform === 'tiktok' ? tiktokAdapter() : youtubeAdapter();
+      const res = await adapter.connect({ mode: 'live', code: q.code, codeVerifier });
+      await saveLiveAccount(st.ws, platform, res, st.acc || null);
       return back({ connected: platform, channel: res.page || res.username });
     } catch (e: any) {
       return back({ connect_error: e?.message || `${name} sign-in failed.` });
@@ -285,7 +309,8 @@ export async function plannerRoutes(app: FastifyInstance) {
       const platform = normalizePlatform(acc.platform);
       if (!platform) throw new PlannerError('Unsupported platform');
       const mode = acc.mode === 'live' ? 'live' : 'sandbox';
-      if (mode === 'live' && isOAuth(platform)) return { redirect: oauthStartUrl(platform, req.user.workspaceId, req.user.userId, acc.id) };
+      const op = oauthProvider(platform);
+      if (mode === 'live' && op) return { redirect: oauthStartUrl(op, req.user.workspaceId, req.user.userId, acc.id) };
       let res;
       try {
         res = await getAdapter(platform, mode).connect({ mode, username: acc.username });

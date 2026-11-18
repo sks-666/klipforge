@@ -125,13 +125,16 @@ export const AccountsDrawer: React.FC = () => {
                       title={live ? 'Sign in and connect your real account' : 'Real publishing needs API keys on the server'}
                       className={`w-full px-2 py-1 rounded-lg border text-[11px] font-semibold disabled:cursor-not-allowed ${live ? 'border-[#5b3bb5] text-[#5b3bb5] dark:text-purple-300 hover:bg-purple-50 dark:hover:bg-purple-950/40' : 'border-zinc-200 dark:border-zinc-700 text-zinc-400'}`}
                     >
-                      {live ? `Connect real ${p === 'youtube' ? 'channel' : 'account'}` : 'Real account (setup needed)'}
+                      {!live ? 'Real account (setup needed)' : p === 'facebook' || p === 'instagram' ? 'Connect with Meta' : `Connect real ${p === 'youtube' ? 'channel' : 'account'}`}
                     </button>
                   </div>
                 );
               })}
             </div>
             <p className="text-[11px] text-zinc-500 mt-2">Sandbox accounts behave like the real thing (scheduling, publishing, failures) without posting anywhere.</p>
+            {platforms.some((x) => (x.id === 'facebook' || x.id === 'instagram') && x.liveConfigured) && (
+              <p className="text-[11px] text-zinc-500 mt-1">Connect with Meta links your Facebook Page and the Instagram account linked to it in one sign-in, so one post can go to both.</p>
+            )}
           </div>
         </div>
       </div>
