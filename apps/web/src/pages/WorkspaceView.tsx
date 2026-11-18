@@ -95,6 +95,15 @@ export const WorkspaceView: React.FC = () => {
 
   // Exported state
   const [exportedVideos, setExportedVideos] = useState<any[]>([]);
+  const [exportFilter, setExportFilter] = useState<'all' | 'editor' | 'auto'>('all');
+  const exportCounts = {
+    all: exportedVideos.length,
+    editor: exportedVideos.filter((v) => v.source === 'editor').length,
+    auto: exportedVideos.filter((v) => v.source !== 'editor').length,
+  };
+  const visibleExports = exportedVideos.filter((v) =>
+    exportFilter === 'all' ? true : exportFilter === 'editor' ? v.source === 'editor' : v.source !== 'editor'
+  );
 
   const isFree = (activeWorkspace?.plan?.key || activeWorkspace?.planKey || 'free') === 'free';
 
@@ -693,10 +702,38 @@ export const WorkspaceView: React.FC = () => {
         <div className="space-y-6">
           <div className="flex items-center justify-between">
             <h1 className="text-xl font-bold">Exported Videos</h1>
-            <span className="text-xs text-zinc-500">{exportedVideos.length} items · Last created</span>
+            <span className="text-xs text-zinc-500">{visibleExports.length} items · Last created</span>
           </div>
+          <div className="flex flex-wrap items-center gap-2" role="tablist" aria-label="Filter exported videos">
+            {(
+              [
+                ['all', 'All'],
+                ['editor', 'Edited in editor'],
+                ['auto', 'Auto-generated from long video'],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                role="tab"
+                aria-selected={exportFilter === key}
+                onClick={() => setExportFilter(key)}
+                className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-colors ${
+                  exportFilter === key
+                    ? 'bg-[#5b3bb5] border-[#5b3bb5] text-white'
+                    : 'bg-white dark:bg-zinc-900 border-zinc-200 dark:border-zinc-800 text-zinc-600 dark:text-zinc-300 hover:border-[#5b3bb5]'
+                }`}
+              >
+                {label} <span className="opacity-70">({exportCounts[key]})</span>
+              </button>
+            ))}
+          </div>
+          {visibleExports.length === 0 && (
+            <p className="text-sm text-zinc-500 py-8 text-center">
+              {exportedVideos.length === 0 ? 'No exported videos yet.' : 'No exported videos match this filter.'}
+            </p>
+          )}
           <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {exportedVideos.map((v) => {
+            {visibleExports.map((v) => {
               const clipId = v.clip?.id || v.clip_id;
               return (
                 <div
@@ -732,6 +769,13 @@ export const WorkspaceView: React.FC = () => {
                   </div>
                   <div className="p-3.5 space-y-2">
                     <p className="text-xs font-bold truncate">{v.clip?.title || 'clip.mp4'}</p>
+                    <span
+                      className={`inline-block px-2 py-0.5 rounded text-[10px] font-semibold ${
+                        v.source === 'editor' ? 'bg-violet-100 text-violet-700 dark:bg-violet-950 dark:text-violet-300' : 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'
+                      }`}
+                    >
+                      {v.source === 'editor' ? 'Edited in editor' : 'Auto-generated'}
+                    </span>
                     <div className="flex items-center justify-between text-[11px] text-zinc-400">
                       <span>{new Date(v.created_at).toLocaleDateString()}</span>
                       <div className="flex items-center gap-3">

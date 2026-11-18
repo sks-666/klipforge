@@ -6,6 +6,7 @@ import { MobileNav } from './MobileNav';
 import { CommandPalette } from './CommandPalette';
 import { UpgradeModal } from './UpgradeModal';
 import { SupportBubble } from './SupportBubble';
+import { Toaster } from './Toaster';
 import { useAppStore } from '../../store/useAppStore';
 export const AppShell = ({ children }) => {
     const { isMobileNavOpen, setMobileNavOpen } = useAppStore();
@@ -32,5 +33,5 @@ export const AppShell = ({ children }) => {
     }, [setMobileNavOpen]);
     return (
     // h-dvh follows the *visible* viewport, so mobile browser toolbars don't cut the layout off.
-    _jsxs("div", { className: "flex h-dvh w-full overflow-hidden bg-zinc-50 dark:bg-zinc-950", children: [_jsx(Sidebar, {}), isMobileNavOpen && (_jsx("div", { className: "fixed inset-0 z-[45] bg-black/50 lg:hidden", onClick: () => setMobileNavOpen(false), "aria-hidden": "true" })), _jsxs("div", { className: "flex-1 flex flex-col min-w-0 overflow-hidden", children: [_jsx(Topbar, {}), _jsx("main", { className: "flex-1 overflow-y-auto overflow-x-hidden p-3 pb-24 sm:p-4 sm:pb-24 lg:p-6", children: children })] }), _jsx(MobileNav, {}), _jsx(CommandPalette, {}), _jsx(UpgradeModal, {}), _jsx(SupportBubble, {})] }));
+    _jsxs("div", { className: "flex h-dvh w-full overflow-hidden bg-zinc-50 dark:bg-zinc-950", children: [_jsx(Sidebar, {}), isMobileNavOpen && (_jsx("div", { className: "fixed inset-0 z-[45] bg-black/50 lg:hidden", onClick: () => setMobileNavOpen(false), "aria-hidden": "true" })), _jsxs("div", { className: "flex-1 flex flex-col min-w-0 overflow-hidden", children: [_jsx(Topbar, {}), _jsx("main", { className: "flex-1 overflow-y-auto overflow-x-hidden p-3 pb-24 sm:p-4 sm:pb-24 lg:p-6", children: children })] }), _jsx(MobileNav, {}), _jsx(CommandPalette, {}), _jsx(UpgradeModal, {}), _jsx(SupportBubble, {}), _jsx(Toaster, {})] }));
 };

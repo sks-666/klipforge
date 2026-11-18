@@ -20,6 +20,7 @@ import {
   YTDLP_SCRIPT,
 } from '../services/clipping.pipeline';
 import { CaptionCue } from '../services/captions.service';
+import { recordClipExport } from '../services/exports.service';
 import {
   Timeline,
   defaultTimeline,
@@ -289,7 +290,7 @@ function clipCaptions(clip: any): CaptionCue[] {
 }
 
 /** Streams a file with HTTP Range support (video scrubbing). */
-function sendFileWithRange(req: FastifyRequest, reply: FastifyReply, filePath: string, mime: string) {
+export function sendFileWithRange(req: FastifyRequest, reply: FastifyReply, filePath: string, mime: string) {
   const stat = fs.statSync(filePath);
   const range = req.headers.range;
   reply.header('Accept-Ranges', 'bytes');
@@ -371,6 +372,13 @@ function queueExport(clip: any, tl: Timeline, workspaceId: string): ExportJob {
         where: { id: clip.id },
         data: { stale: false, edit_doc_json: { ...((current?.edit_doc_json || {}) as any), timelineDuration: durationSec } },
       });
+      // Record it so the video appears in the Exported tab.
+      await recordClipExport({
+        clipId: clip.id,
+        workspaceId,
+        res: '1080p',
+        durationMs: Math.round(durationSec * 1000),
+      }).catch((e) => console.error('Failed to record export:', e?.message));
       job.status = 'done';
       job.progress = 1;
       job.videoUrl = `/media/clips/${clip.id}.mp4?v=${new Date(updated.updated_at).getTime()}`;
@@ -493,6 +501,75 @@ export async function editorRoutes(app: FastifyInstance) {
       }
     }
   );
+
+  // ---- add another clip / a moment of the original video to the timeline -----------------------
+  // Both are imported into the workspace vault (category "Clips") so the editor, preview and export
+  // treat them like any other media. Re-importing the same clip version reuses the vault item.
+  const fmtSrc = (t: number) => `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
+
+  app.post('/api/v1/vault/import-clip', { preHandler: [requireRole('editor')] }, async (req, reply) => {
+    const body = z.object({ clipId: z.string().min(1) }).safeParse(req.body);
+    if (!body.success) return reply.status(400).send({ code: 4002, errMsg: 'clipId is required' });
+    const clip = await findOwnedClip(body.data.clipId, req.user.workspaceId);
+    if (!clip) return reply.status(404).send({ code: 4004, errMsg: 'Clip not found' });
+    const file = path.join(CLIPS_STORAGE_DIR, `${clip.id}.mp4`);
+    if (!fs.existsSync(file)) return reply.status(409).send({ code: 4009, errMsg: 'This clip has no rendered video yet' });
+    const ws = req.user.workspaceId;
+    const version = `v:${Math.round(fs.statSync(file).mtimeMs)}`;
+    const existing = readVault(ws).find((it) => it.tags.includes(`clip:${clip.id}`.toLowerCase()) && it.tags.includes(version));
+    if (existing) return { item: withUrl(ws)(existing), reused: true };
+    try {
+      const item = await addVaultFile({
+        workspaceId: ws,
+        data: fs.readFileSync(file),
+        filename: `${clip.id}.mp4`,
+        name: String(clip.title || 'Clip').slice(0, 80),
+        category: 'Clips',
+        tags: [`clip:${clip.id}`, version, 'clip'],
+      });
+      return reply.status(201).send({ item: withUrl(ws)(item) });
+    } catch (err: any) {
+      return reply.status(err?.status || 500).send({ code: 4002, errMsg: err?.message || 'Import failed' });
+    }
+  });
+
+  app.post('/api/v1/vault/import-source', { preHandler: [requireRole('editor')] }, async (req, reply) => {
+    const body = z.object({ clipId: z.string().min(1), start: z.number().min(0), end: z.number().min(0) }).safeParse(req.body);
+    if (!body.success) return reply.status(400).send({ code: 4002, errMsg: 'clipId, start and end are required' });
+    const clip = await findOwnedClip(body.data.clipId, req.user.workspaceId);
+    if (!clip) return reply.status(404).send({ code: 4004, errMsg: 'Clip not found' });
+    const st = await clipSourceStatus(clip);
+    if (st.status !== 'ready') {
+      return reply.status(409).send({ code: 4009, errMsg: st.status === 'downloading' ? 'The original video is still downloading. Try again in a minute.' : 'The original video isn’t available for this clip' });
+    }
+    const src = st.source;
+    const lo = Math.max(src.offset, Math.min(body.data.start, body.data.end));
+    const hi = Math.min(src.offset + src.durationSec, Math.max(body.data.start, body.data.end));
+    if (hi - lo < 0.3) return reply.status(400).send({ code: 4002, errMsg: 'Pick at least 0.3 s of the original video' });
+    if (hi - lo > 60) return reply.status(400).send({ code: 4002, errMsg: 'Pick 60 seconds or less' });
+    const tmp = path.join(CLIPS_STORAGE_DIR, `import_${crypto.randomBytes(5).toString('hex')}.mp4`);
+    try {
+      await execFileAsync(
+        FFMPEG_BIN,
+        ['-y', '-hide_banner', '-loglevel', 'error', '-ss', (lo - src.offset).toFixed(3), '-i', src.path, '-t', (hi - lo).toFixed(3),
+          '-map', '0:v:0', '-map', '0:a:0?', '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '20', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', '-movflags', '+faststart', tmp],
+        { timeout: 300000 }
+      );
+      const item = await addVaultFile({
+        workspaceId: req.user.workspaceId,
+        data: fs.readFileSync(tmp),
+        filename: 'source.mp4',
+        name: `Original ${fmtSrc(lo)}–${fmtSrc(hi)}`,
+        category: 'Clips',
+        tags: [`source:${clip.project_id}`, 'source'],
+      });
+      return reply.status(201).send({ item: withUrl(req.user.workspaceId)(item) });
+    } catch (err: any) {
+      return reply.status(err?.status || 500).send({ code: 4002, errMsg: err?.message?.slice(0, 200) || 'Import failed' });
+    } finally {
+      fs.rmSync(tmp, { force: true });
+    }
+  });
 
   app.patch('/api/v1/vault/:id', { preHandler: [requireRole('editor')] }, async (req, reply) => {
     const { id } = req.params as { id: string };

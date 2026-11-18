@@ -47,6 +47,7 @@ export async function apiFetch<T = any>(
       status: res.status,
       code: data.code,
       field: data.field,
+      data,
     });
   }
   return data as T;

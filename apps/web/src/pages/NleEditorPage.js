@@ -1,9 +1,10 @@
 import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime";
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { ArrowLeft, Crosshair, Download, Loader2, MousePointer2, Pause, Play, Redo2, Scissors, Snowflake, Star, Trash2, Undo2, Upload, Wand2, ZoomIn, } from 'lucide-react';
+import { ArrowLeft, ArrowLeftToLine, ArrowRightToLine, ChevronDown, Copy, Crosshair, Gauge, Magnet, MoreHorizontal, Plus, Replace, SquareSplitHorizontal, Download, Loader2, MousePointer2, Pause, Play, Redo2, Scissors, Snowflake, Star, Trash2, Undo2, Upload, Wand2, ZoomIn, } from 'lucide-react';
 import { apiFetch, API_BASE } from '../lib/api';
 import { CaptionVisual } from './ClipEditorPage';
+import { AddMediaSheet, MEDIA_DRAG_TYPE } from '../components/editor/AddMediaSheet';
 const EASE_FN = {
     linear: (u) => u,
     easeOut: (u) => 1 - Math.pow(1 - u, 3),
@@ -89,12 +90,12 @@ function splitBase(tl, T) {
     let b;
     if (s.kind === 'freeze') {
         a = { ...s, freezeDur: loc.local };
-        b = { ...s, id: uid('seg'), freezeDur: d - loc.local };
+        b = { ...s, id: uid('seg'), freezeDur: d - loc.local, transitionIn: undefined };
     }
     else {
         const mid = s.srcIn + loc.local * s.speed;
         a = { ...s, srcOut: mid };
-        b = { ...s, id: uid('seg'), srcIn: mid };
+        b = { ...s, id: uid('seg'), srcIn: mid, transitionIn: undefined };
     }
     const base = [...tl.base];
     base.splice(loc.i, 1, a, b);
@@ -111,11 +112,99 @@ function rippleAfter(tl, T, dt) {
         camera: tl.camera.map((k) => ({ ...k, t: sh(k.t) })),
     };
 }
+/**
+ * Removes the time range [a, b] from V1 and closes the gap (ripple). Overlays, audio, captions and
+ * camera keys follow: anything after b moves left by (b - a); anything inside the range is clipped
+ * to it. Returns the new timeline and a map from old time to new time (for the playhead).
+ */
+function removeRange(tl, a, b) {
+    const identity = (t) => t;
+    const total = totalDur(tl);
+    a = clamp(a, 0, total);
+    b = clamp(b, 0, total);
+    if (b - a < 0.04)
+        return { tl, map: identity };
+    let cur = splitBase(tl, a).tl;
+    cur = splitBase(cur, b).tl;
+    const keep = [];
+    let t0 = 0;
+    for (const s of cur.base) {
+        const d = segDur(s);
+        const inside = t0 >= a - 1e-3 && t0 + d <= b + 1e-3;
+        if (!inside)
+            keep.push(s);
+        t0 += d;
+    }
+    if (!keep.length)
+        return { tl, map: identity }; // never leave V1 empty
+    const dt = b - a;
+    const map = (t) => (t <= a ? t : t >= b ? t - dt : a);
+    const MIN = 0.05;
+    const overlays = cur.overlays
+        .map((o) => {
+        const start = map(o.start);
+        const end = map(o.end);
+        // content that started inside the removed range resumes at its far edge
+        const assetIn = o.start > a && o.start < b ? o.assetIn + (b - o.start) : o.assetIn;
+        return { ...o, start, end, assetIn };
+    })
+        .filter((o) => o.end - o.start >= MIN);
+    const audio = cur.audio
+        .map((x) => {
+        const start = map(x.start);
+        const end = map(x.end);
+        const assetIn = x.start > a && x.start < b ? x.assetIn + (b - x.start) : x.assetIn;
+        return { ...x, start, end, assetIn };
+    })
+        .filter((x) => x.end - x.start >= MIN);
+    const captions = cur.captions
+        .map((c) => ({ ...c, startSec: map(c.startSec), endSec: map(c.endSec) }))
+        .filter((c) => c.endSec - c.startSec >= MIN);
+    const camera = cur.camera.map((k) => ({ ...k, t: map(k.t) }));
+    return { tl: { ...cur, base: keep, overlays, audio, captions, camera }, map };
+}
+/** Splits the V1 segment under T into `n` equal parts; returns the new timeline (or the same one). */
+function sliceSegment(tl, T, n) {
+    const { i, start } = locate(tl, T);
+    const seg = tl.base[i];
+    const d = segDur(seg);
+    if (n < 2 || d / n < 0.1)
+        return tl;
+    let cur = tl;
+    for (let k = 1; k < n; k++)
+        cur = splitBase(cur, start + (d * k) / n).tl;
+    return cur;
+}
 function insertBase(tl, T, seg) {
     const { tl: split, at } = splitBase(tl, T);
     const base = [...split.base];
     base.splice(at, 0, seg);
     return rippleAfter({ ...split, base }, T, segDur(seg));
+}
+/** Start time of main-video segment i on the timeline. */
+const baseStart = (tl, i) => tl.base.slice(0, i).reduce((a, s) => a + segDur(s), 0);
+/** Splits an overlay at timeline time T, keeping its motion (keyframes) continuous. */
+function splitOverlay(o, T) {
+    if (T <= o.start + 0.05 || T >= o.end - 0.05)
+        return null;
+    const local = T - o.start;
+    const mid = { ...kfAt(o, T) };
+    const left = [...o.keyframes.filter((k) => k.t < local - 1e-3), { ...mid, t: +local.toFixed(3) }];
+    const right = [{ ...mid, t: 0 }, ...o.keyframes.filter((k) => k.t > local + 1e-3).map((k) => ({ ...k, t: +(k.t - local).toFixed(3) }))];
+    return [
+        { ...o, end: T, keyframes: left },
+        { ...o, id: uid('ov'), start: T, assetIn: o.assetIn + local, keyframes: right },
+    ];
+}
+function splitAudio(a, T) {
+    if (T <= a.start + 0.05 || T >= a.end - 0.05)
+        return null;
+    return [{ ...a, end: T }, { ...a, id: uid('au'), start: T, assetIn: a.assetIn + (T - a.start) }];
+}
+function splitCue(c, T) {
+    if (T <= c.startSec + 0.05 || T >= c.endSec - 0.05)
+        return null;
+    return [{ ...c, endSec: T }, { ...c, id: uid('cap'), startSec: T }];
 }
 // =============================================================================================
 // WebGL chroma key (real-time preview of the export's chromakey + despill)
@@ -290,11 +379,13 @@ function uploadWithProgress(pathAndQuery, file, onProgress) {
 const UPLOAD_ACCEPT = 'video/*,image/*,audio/*,.mov,.mkv,.m4v,.avi,.heic,.heif,.gif,.webp,.flac,.aac';
 const TRACK_ROWS = ['text', 'v4', 'v3', 'v2', 'v1', 'cam', 'a1', 'a2', 'a3', 'a4'];
 const ROW_LABEL = {
-    text: 'Text', v4: 'V4', v3: 'V3', v2: 'V2', v1: 'V1 Base', cam: 'Camera', a1: 'A1 Game', a2: 'A2 SFX', a3: 'A3 SFX', a4: 'A4 SFX',
+    text: 'Text', v4: 'Overlay 3', v3: 'Overlay 2', v2: 'Overlay 1', v1: 'Main video', cam: 'Zoom', a1: 'Game audio', a2: 'Sound 1', a3: 'Sound 2', a4: 'Sound 3',
 };
 const ROW_H = 30;
 // Module-level so React keeps the same component type between renders (inputs keep focus/drag).
-const ToolBtn = ({ on, onClick, title, children }) => (_jsx("button", { onClick: onClick, title: title, className: `flex items-center gap-1 px-2 py-1.5 rounded-md text-[11px] font-semibold whitespace-nowrap ${on ? 'bg-[#5b3bb5] text-white' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200'}`, children: children }));
+const ToolBtn = ({ on, onClick, title, children, disabled, danger }) => (_jsx("button", { onClick: onClick, title: title, disabled: disabled, className: `flex items-center gap-1 px-2 py-1.5 rounded-md text-[11px] font-semibold whitespace-nowrap disabled:opacity-35 disabled:cursor-not-allowed ${on ? 'bg-[#5b3bb5] text-white' : danger ? 'bg-zinc-800 hover:bg-rose-950 text-rose-300' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200'}`, children: children }));
+/** Trim handle on a timeline clip: a thick white grip when the clip is selected, a faint hover zone otherwise. */
+const Handle = ({ side, active, onPointerDown }) => (_jsx("div", { onPointerDown: onPointerDown, title: "Drag to trim", className: `absolute top-0 bottom-0 z-10 w-3 cursor-ew-resize flex items-center justify-center ${side === 'l' ? 'left-0 rounded-l' : 'right-0 rounded-r'} ${active ? 'bg-white' : 'hover:bg-white/40'}`, children: active && _jsx("span", { className: "w-0.5 h-3 rounded-full bg-zinc-600" }) }));
 const Slider = ({ label, value, min, max, step, onChange, onEnd, fmtv }) => (_jsxs("label", { className: "block space-y-0.5", children: [_jsxs("span", { className: "flex justify-between text-[10px] font-bold uppercase text-zinc-500", children: [_jsx("span", { children: label }), _jsx("span", { className: "text-zinc-300 normal-case font-mono", children: fmtv ? fmtv(value) : value.toFixed(2) })] }), _jsx("input", { type: "range", min: min, max: max, step: step, value: value, onChange: (e) => onChange(Number(e.target.value)), onPointerUp: onEnd, onKeyUp: onEnd, className: "w-full accent-purple-500" })] }));
 // =============================================================================================
 // Page
@@ -311,6 +402,10 @@ export const NleEditorPage = ({ clipId }) => {
     const [T, setT] = useState(0);
     const [playing, setPlaying] = useState(false);
     const [tool, setTool] = useState('select');
+    // In / out marks (seconds on the timeline) for cutting or keeping a range, and the "slice into N" count.
+    const [markIn, setMarkIn] = useState(null);
+    const [markOut, setMarkOut] = useState(null);
+    const [sliceN, setSliceN] = useState(3);
     const [vault, setVault] = useState([]);
     const [vaultCat, setVaultCat] = useState('All');
     const [vaultQ, setVaultQ] = useState('');
@@ -324,7 +419,7 @@ export const NleEditorPage = ({ clipId }) => {
     const [tlHeight, setTlHeight] = useState(() => {
         try {
             const v = Number(localStorage.getItem('kf_nle_timeline_h'));
-            return v >= 140 ? v : TL_DEFAULT;
+            return v >= 140 ? v : window.innerWidth < 768 ? 260 : TL_DEFAULT;
         }
         catch {
             return TL_DEFAULT;
@@ -360,7 +455,28 @@ export const NleEditorPage = ({ clipId }) => {
         window.addEventListener('pointermove', mv);
         window.addEventListener('pointerup', up);
     };
-    const [toast, setToast] = useState(null);
+    const [toast, setToastRaw] = useState(null);
+    const [toastUndo, setToastUndo] = useState(false);
+    const setToast = (m) => {
+        setToastRaw(m);
+        setToastUndo(false);
+    };
+    /** Toast with an Undo button (used after adds, splits, trims and deletes). */
+    const notifyUndo = (m) => {
+        setToastRaw(m);
+        setToastUndo(true);
+    };
+    const [snap, setSnap] = useState(true);
+    const [snapLine, setSnapLine] = useState(null);
+    const [dragInfo, setDragInfo] = useState(null);
+    const [cutFlash, setCutFlash] = useState(null);
+    const [addSheet, setAddSheet] = useState(null);
+    const [menu, setMenu] = useState(null);
+    const [bladeT, setBladeT] = useState(null);
+    const [dropHint, setDropHint] = useState(null);
+    const [addMenuFor, setAddMenuFor] = useState(null);
+    /** phones: the vault/captions drawer and the inspector open as bottom sheets */
+    const [phonePanel, setPhonePanel] = useState(null);
     const [job, setJob] = useState(null);
     const [busy, setBusy] = useState(null);
     const canvasRef = useRef(null);
@@ -920,26 +1036,302 @@ export const NleEditorPage = ({ clipId }) => {
         commit({ ...tl, overlays: tl.overlays.map((x) => (x.id === o.id ? { ...x, keyframes: keys } : x)) });
         setToast(`Animation: ${kind}`);
     };
-    const splitAction = () => {
+    const flashCut = (t) => {
+        setCutFlash(t);
+        window.setTimeout(() => setCutFlash((v) => (v === t ? null : v)), 900);
+    };
+    /** Splits the selected clip (any track) at T; with nothing selected, the main video under T. */
+    const splitAt = (T, target = sel) => {
         if (!tl)
             return;
-        commit(splitBase(tl, clock.current.T).tl);
-        setToast('Split V1 at playhead');
+        const miss = () => setToast('Move the playhead over the selected clip to split it');
+        if (target?.type === 'overlay') {
+            const o = tl.overlays.find((x) => x.id === target.id);
+            const r = o && splitOverlay(o, T);
+            if (!r)
+                return miss();
+            commit({ ...tl, overlays: tl.overlays.flatMap((x) => (x.id === o.id ? r : [x])) });
+            setSel({ type: 'overlay', id: r[1].id });
+        }
+        else if (target?.type === 'audio') {
+            const a = tl.audio.find((x) => x.id === target.id);
+            const r = a && splitAudio(a, T);
+            if (!r)
+                return miss();
+            commit({ ...tl, audio: tl.audio.flatMap((x) => (x.id === a.id ? r : [x])) });
+            setSel({ type: 'audio', id: r[1].id });
+        }
+        else if (target?.type === 'caption') {
+            const c = tl.captions.find((x) => x.id === target.id);
+            const r = c && splitCue(c, T);
+            if (!r)
+                return miss();
+            commit({ ...tl, captions: tl.captions.flatMap((x) => (x.id === c.id ? r : [x])) });
+            setSel({ type: 'caption', id: r[1].id });
+        }
+        else {
+            if (target?.type === 'base') {
+                const i = tl.base.findIndex((s) => s.id === target.id);
+                const st = baseStart(tl, i);
+                if (i < 0 || T <= st + 0.04 || T >= st + segDur(tl.base[i]) - 0.04)
+                    return miss();
+            }
+            const r = splitBase(tl, T);
+            if (r.tl === tl)
+                return setToast('Too close to an existing cut to split here');
+            commit(r.tl);
+            setSel({ type: 'base', id: r.tl.base[r.at].id });
+        }
+        flashCut(T);
+        notifyUndo(`Split at ${fmt(T)}`);
+    };
+    const splitAction = () => splitAt(clock.current.T);
+    /** Trims the selected clip (or the main-video clip under the playhead) up to the playhead. */
+    const trimSelected = (side) => {
+        if (!tl)
+            return;
+        const T = clock.current.T;
+        const outside = () => setToast('Move the playhead inside the clip you want to trim');
+        if (sel?.type === 'overlay') {
+            const o = tl.overlays.find((x) => x.id === sel.id);
+            const r = o && splitOverlay(o, T);
+            if (!r)
+                return outside();
+            const keep = side === 'left' ? { ...r[1], id: o.id } : r[0];
+            commit({ ...tl, overlays: tl.overlays.map((x) => (x.id === o.id ? keep : x)) });
+        }
+        else if (sel?.type === 'audio') {
+            const a = tl.audio.find((x) => x.id === sel.id);
+            const r = a && splitAudio(a, T);
+            if (!r)
+                return outside();
+            const keep = side === 'left' ? { ...r[1], id: a.id } : r[0];
+            commit({ ...tl, audio: tl.audio.map((x) => (x.id === a.id ? keep : x)) });
+        }
+        else if (sel?.type === 'caption') {
+            const c = tl.captions.find((x) => x.id === sel.id);
+            const r = c && splitCue(c, T);
+            if (!r)
+                return outside();
+            const keep = side === 'left' ? { ...r[1], id: c.id } : r[0];
+            commit({ ...tl, captions: tl.captions.map((x) => (x.id === c.id ? keep : x)) });
+        }
+        else {
+            const i = sel?.type === 'base' ? tl.base.findIndex((s) => s.id === sel.id) : locate(tl, T).i;
+            if (i < 0)
+                return;
+            const st = baseStart(tl, i);
+            const en = st + segDur(tl.base[i]);
+            if (T <= st + 0.05 || T >= en - 0.05)
+                return outside();
+            if (side === 'left')
+                cutRange(st, T, 'Trimmed the start of the clip');
+            else
+                cutRange(T, en, 'Trimmed the end of the clip');
+            setToastUndo(true);
+            return;
+        }
+        flashCut(T);
+        notifyUndo(side === 'left' ? 'Trimmed the start of the clip' : 'Trimmed the end of the clip');
+    };
+    /** Copies the selected clip right after itself. */
+    const duplicateSelected = () => {
+        if (!tl || !sel)
+            return setToast('Select a clip to duplicate');
+        if (sel.type === 'base') {
+            const i = tl.base.findIndex((s) => s.id === sel.id);
+            const seg = tl.base[i];
+            const copy = { ...seg, id: uid('seg'), transitionIn: undefined };
+            commit(insertBase(tl, baseStart(tl, i) + segDur(seg), copy));
+            setSel({ type: 'base', id: copy.id });
+        }
+        else if (sel.type === 'overlay') {
+            const o = tl.overlays.find((x) => x.id === sel.id);
+            const len = o.end - o.start;
+            const start = Math.min(o.end, Math.max(0, total - len));
+            const copy = { ...o, id: uid('ov'), start, end: start + len, track: firstFreeTrack(tl.overlays, start, start + len) };
+            commit({ ...tl, overlays: [...tl.overlays, copy] });
+            setSel({ type: 'overlay', id: copy.id });
+        }
+        else if (sel.type === 'audio') {
+            const a = tl.audio.find((x) => x.id === sel.id);
+            const len = a.end - a.start;
+            const start = Math.min(a.end, Math.max(0, total - len));
+            const copy = { ...a, id: uid('au'), start, end: start + len, track: firstFreeTrack(tl.audio, start, start + len) };
+            commit({ ...tl, audio: [...tl.audio, copy] });
+            setSel({ type: 'audio', id: copy.id });
+        }
+        else {
+            const c = tl.captions.find((x) => x.id === sel.id);
+            const len = c.endSec - c.startSec;
+            const start = Math.min(c.endSec, Math.max(0, total - len));
+            const copy = { ...c, id: uid('cap'), startSec: start, endSec: start + len };
+            commit({ ...tl, captions: [...tl.captions, copy] });
+            setSel({ type: 'caption', id: copy.id });
+        }
+        notifyUndo('Duplicated');
+    };
+    /** Cut [a, b] out of V1 (ripple) and park the playhead where the cut closed. */
+    const cutRange = (a, b, label) => {
+        if (!tl)
+            return;
+        const lo = Math.min(a, b);
+        const hi = Math.max(a, b);
+        const r = removeRange(tl, lo, hi);
+        if (r.tl === tl) {
+            setToast(totalDur(tl) - (hi - lo) < 0.05 ? 'Can’t remove everything — keep at least a little video' : 'Range is too short to cut');
+            return;
+        }
+        commit(r.tl);
+        setMarkIn(null);
+        setMarkOut(null);
+        setSel(null);
+        seek(r.map(clock.current.T));
+        setToast(`${label} (${(hi - lo).toFixed(2)} s removed)`);
+    };
+    /** Drop everything before (side 'start') or after (side 'end') the playhead on the whole timeline. */
+    const trimToPlayhead = (side) => {
+        if (!tl)
+            return;
+        const at = clock.current.T;
+        const dur = totalDur(tl);
+        if (side === 'start') {
+            if (at < 0.1)
+                return setToast('Move the playhead later to trim the start');
+            cutRange(0, at, 'Trimmed start');
+        }
+        else {
+            if (dur - at < 0.1)
+                return setToast('Move the playhead earlier to trim the end');
+            cutRange(at, dur, 'Trimmed end');
+        }
+    };
+    const keepRange = () => {
+        if (!tl || markIn === null || markOut === null)
+            return setToast('Set In (I) and Out (O) marks first');
+        const lo = Math.min(markIn, markOut);
+        const hi = Math.max(markIn, markOut);
+        if (hi - lo < 0.1)
+            return setToast('Range is too short to keep');
+        const dur = totalDur(tl);
+        let next = tl;
+        if (hi < dur - 0.04)
+            next = removeRange(next, hi, dur).tl;
+        if (lo > 0.04)
+            next = removeRange(next, 0, lo).tl;
+        commit(next);
+        setMarkIn(null);
+        setMarkOut(null);
+        setSel(null);
+        seek(0);
+        setToast('Kept only the marked range');
+    };
+    const sliceAction = () => {
+        if (!tl)
+            return;
+        const next = sliceSegment(tl, clock.current.T, sliceN);
+        if (next === tl)
+            return setToast('Segment is too short to slice that many times');
+        commit(next);
+        setToast(`Sliced the segment under the playhead into ${sliceN} equal parts`);
+    };
+    /** Length used when a video/image goes into the main video (clips can be longer than memes). */
+    const fullDur = (v) => (v.kind === 'image' ? 2.5 : clamp(v.durationSec, 0.3, 120));
+    /**
+     * Puts a vault item on the timeline:
+     *  - insert: into the main video at `at` (everything after moves later)
+     *  - top: as an overlay (videos from your clips become picture-in-picture)
+     *  - replace: swaps the selected main-video clip or overlay
+     * Sounds always go on a sound track.
+     */
+    const placeMedia = (v, mode, at = clock.current.T, track) => {
+        const cur = tlRef.current;
+        if (!cur)
+            return false;
+        if (v.kind === 'audio') {
+            let next = stampAsset(cur, v, at);
+            const added = next.audio[next.audio.length - 1];
+            if (track && added)
+                next = { ...next, audio: next.audio.map((a) => (a.id === added.id ? { ...a, track } : a)) };
+            commit(next);
+            notifyUndo(`Added sound "${v.name}" at ${fmt(at)}`);
+            return true;
+        }
+        if (mode === 'replace') {
+            if (sel?.type === 'base') {
+                const i = cur.base.findIndex((s) => s.id === sel.id);
+                const old = cur.base[i];
+                const d0 = segDur(old);
+                const len = v.kind === 'image' ? d0 : Math.min(fullDur(v), d0);
+                const seg = { id: uid('seg'), kind: 'asset', assetId: v.id, srcIn: 0, srcOut: len, speed: 1, preservePitch: true, transitionIn: old.transitionIn };
+                const end0 = baseStart(cur, i) + d0;
+                const base = cur.base.map((s, j) => (j === i ? seg : s));
+                commit(rippleAfter({ ...cur, base }, end0, len - d0));
+                setSel({ type: 'base', id: seg.id });
+                notifyUndo(`Replaced the clip with "${v.name}"`);
+                return true;
+            }
+            if (sel?.type === 'overlay') {
+                commit({ ...cur, overlays: cur.overlays.map((o) => (o.id === sel.id ? { ...o, assetId: v.id, assetIn: 0, ...visualDefaults(v) } : o)) });
+                notifyUndo(`Replaced the overlay with "${v.name}"`);
+                return true;
+            }
+            setToast('Select a clip on the main video or an overlay to replace');
+            return false;
+        }
+        if (mode === 'insert') {
+            const d = fullDur(v);
+            const seg = { id: uid('seg'), kind: 'asset', assetId: v.id, srcIn: 0, srcOut: d, speed: 1, preservePitch: true };
+            commit(insertBase(cur, at, seg));
+            setSel({ type: 'base', id: seg.id });
+            flashCut(at);
+            notifyUndo(`Inserted "${v.name}" (${d.toFixed(1)} s) — the rest moved later`);
+            return true;
+        }
+        // on top
+        const pip = v.category === 'Clips';
+        let next = stampAsset(cur, v, at, pip ? Math.min(fullDur(v), Math.max(0.3, totalDur(cur) - at)) : undefined, pip ? { x: 0.7, y: 0.26 } : undefined);
+        const added = next.overlays[next.overlays.length - 1];
+        if (added && (pip || track)) {
+            next = {
+                ...next,
+                overlays: next.overlays.map((o) => o.id === added.id ? { ...o, ...(track ? { track } : {}), keyframes: pip ? o.keyframes.map((k) => ({ ...k, scale: 0.45 })) : o.keyframes } : o),
+            };
+        }
+        commit(next);
+        notifyUndo(`Added "${v.name}" on top at ${fmt(at)}`);
+        return true;
+    };
+    /** Turns a picked clip / original-video range into a vault item (imports on the server if needed). */
+    const resolvePick = async (pick) => {
+        try {
+            if (pick.kind === 'vault')
+                return vaultById.get(pick.item.id) || pick.item;
+            setBusy(pick.kind === 'clip' ? `Adding “${pick.title}”…` : 'Cutting the original video…');
+            const r = pick.kind === 'clip'
+                ? await apiFetch('/api/v1/vault/import-clip', { method: 'POST', body: JSON.stringify({ clipId: pick.clipId }) })
+                : await apiFetch('/api/v1/vault/import-source', { method: 'POST', body: JSON.stringify({ clipId, start: pick.start, end: pick.end }) });
+            setVault((list) => (list.some((x) => x.id === r.item.id) ? list : [...list, r.item]));
+            vaultById.set(r.item.id, r.item);
+            return r.item;
+        }
+        catch (e) {
+            setToast(e.message || 'Could not add that');
+            return null;
+        }
+        finally {
+            setBusy(null);
+        }
     };
     const insertCutaway = (item) => {
         if (!tl)
             return;
         const v = item || (vaultSel ? vaultById.get(vaultSel) : null);
         if (!v || v.kind === 'audio') {
-            splitAction();
-            setToast('Select a meme video or image in the vault to insert it as a cutaway');
+            setAddSheet({ mode: 'insert' });
             return;
         }
-        const d = itemDur(v);
-        const seg = { id: uid('seg'), kind: 'asset', assetId: v.id, srcIn: 0, srcOut: d, speed: 1, preservePitch: true };
-        commit(insertBase(tl, clock.current.T, seg));
-        setSel({ type: 'base', id: seg.id });
-        setToast(`Inserted "${v.name}" (${d.toFixed(1)} s) — gameplay shifted forward`);
+        placeMedia(v, 'insert');
     };
     const freezeAction = () => {
         if (!tl)
@@ -1008,6 +1400,7 @@ export const NleEditorPage = ({ clipId }) => {
         else if (sel.type === 'caption')
             commit({ ...tl, captions: tl.captions.filter((c) => c.id !== sel.id) });
         setSel(null);
+        notifyUndo('Deleted');
     };
     const addPunchZoom = (x, y) => {
         if (!tl)
@@ -1216,7 +1609,7 @@ export const NleEditorPage = ({ clipId }) => {
     useEffect(() => {
         const onKey = (e) => {
             const tag = e.target?.tagName;
-            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !tl)
+            if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || !tl || addSheet)
                 return;
             const k = e.key.toLowerCase();
             if (e.code === 'Space') {
@@ -1236,14 +1629,40 @@ export const NleEditorPage = ({ clipId }) => {
             }
             else if (k === 'b')
                 splitAction();
+            else if (k === 'a')
+                setAddSheet({ mode: 'insert' });
+            else if (k === 'c')
+                setTool((t) => (t === 'blade' ? 'select' : 'blade'));
+            else if (k === 'd')
+                duplicateSelected();
             else if (k === 'f')
                 freezeAction();
+            else if (k === 'i') {
+                setMarkIn(clock.current.T);
+                setToast(`In mark at ${fmt(clock.current.T)}`);
+            }
+            else if (k === 'o') {
+                setMarkOut(clock.current.T);
+                setToast(`Out mark at ${fmt(clock.current.T)}`);
+            }
+            else if (k === 'x') {
+                if (markIn !== null && markOut !== null)
+                    cutRange(markIn, markOut, 'Cut range');
+                else
+                    setToast('Set In (I) and Out (O) marks first');
+            }
+            else if (k === 'q')
+                trimSelected('left');
+            else if (k === 'w')
+                trimSelected('right');
             else if (k === 'z')
                 setTool((t) => (t === 'zoom' ? 'select' : 'zoom'));
             else if (k === 't')
                 setTool((t) => (t === 'track' ? 'select' : 'track'));
-            else if (k === 'v' || k === 'escape')
+            else if (k === 'v' || k === 'escape') {
                 setTool('select');
+                setMenu(null);
+            }
             else if (k === 'delete' || k === 'backspace') {
                 e.preventDefault();
                 deleteSelected();
@@ -1266,9 +1685,9 @@ export const NleEditorPage = ({ clipId }) => {
     useEffect(() => {
         if (!toast)
             return;
-        const id = setTimeout(() => setToast(null), 3200);
+        const id = setTimeout(() => setToast(null), toastUndo ? 5000 : 3200);
         return () => clearTimeout(id);
-    }, [toast]);
+    }, [toast, toastUndo]); // eslint-disable-line react-hooks/exhaustive-deps
     // ---- save / export --------------------------------------------------------------------------
     const save = async () => {
         if (!tl)
@@ -1316,7 +1735,7 @@ export const NleEditorPage = ({ clipId }) => {
     const onUpload = async (files, place) => {
         const list = Array.from(files || []);
         if (!list.length)
-            return;
+            return [];
         const added = [];
         try {
             for (const [i, file] of list.entries()) {
@@ -1337,7 +1756,7 @@ export const NleEditorPage = ({ clipId }) => {
                 setToast(`Added ${added.length > 1 ? `${added.length} files` : `"${added[0].name}"`} at ${fmt(clock.current.T)}`);
             }
             else {
-                setToast(`Uploaded ${added.length > 1 ? `${added.length} files` : `"${added[0].name}"`} — click + Add to use it`);
+                setToast(`Uploaded ${added.length > 1 ? `${added.length} files` : `"${added[0].name}"`} — choose where it goes`);
             }
             if (added.length === 1)
                 setVaultSel(added[0].id);
@@ -1348,6 +1767,7 @@ export const NleEditorPage = ({ clipId }) => {
         finally {
             setBusy(null);
         }
+        return added;
     };
     const [dropTarget, setDropTarget] = useState(null);
     const dropProps = (target) => ({
@@ -1483,11 +1903,99 @@ export const NleEditorPage = ({ clipId }) => {
         const r = el.getBoundingClientRect();
         return clamp((clientX - r.left + el.scrollLeft - 72) / pxPerSec, 0, total);
     };
+    /** Times an edge can snap to: playhead, start/end, cuts, other clips' edges and the In/Out marks. */
+    const snapPoints = (exclude) => {
+        const t = tlRef.current;
+        if (!t)
+            return [];
+        const pts = [0, totalDur(t), clock.current.T];
+        let acc = 0;
+        for (const sg of t.base) {
+            pts.push(acc);
+            acc += segDur(sg);
+        }
+        for (const o of t.overlays)
+            if (o.id !== exclude)
+                pts.push(o.start, o.end);
+        for (const a of t.audio)
+            if (a.id !== exclude)
+                pts.push(a.start, a.end);
+        for (const c of t.captions)
+            if (c.id !== exclude)
+                pts.push(c.startSec, c.endSec);
+        if (markIn !== null)
+            pts.push(markIn);
+        if (markOut !== null)
+            pts.push(markOut);
+        return pts;
+    };
+    const snapTo = (t, pts) => {
+        if (!snap)
+            return { t, hit: false };
+        const th = 8 / pxPerSec;
+        let best = null;
+        for (const p of pts)
+            if (Math.abs(p - t) < th && (best === null || Math.abs(p - t) < Math.abs(best - t)))
+                best = p;
+        return best === null ? { t, hit: false } : { t: best, hit: true };
+    };
+    /** Drop targets on the timeline for media dragged from the Add media panel or the vault. */
+    const rowDrop = (row) => {
+        const track = row === 'v2' || row === 'a2' ? 2 : row === 'v3' || row === 'a3' ? 3 : row === 'v4' || row === 'a4' ? 4 : undefined;
+        if (!['v1', 'v2', 'v3', 'v4', 'a2', 'a3', 'a4'].includes(row))
+            return {};
+        return {
+            onDragOver: (e) => {
+                if (!Array.from(e.dataTransfer.types).includes(MEDIA_DRAG_TYPE))
+                    return;
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'copy';
+                const t = snapTo(timeFromX(e.clientX), snapPoints()).t;
+                setDropHint((h) => (h && h.row === row && Math.abs(h.t - t) < 1e-3 ? h : { row, t }));
+            },
+            onDragLeave: (e) => {
+                if (!e.currentTarget.contains(e.relatedTarget))
+                    setDropHint(null);
+            },
+            onDrop: async (e) => {
+                const raw = e.dataTransfer.getData(MEDIA_DRAG_TYPE);
+                setDropHint(null);
+                if (!raw)
+                    return;
+                e.preventDefault();
+                const t = snapTo(timeFromX(e.clientX), snapPoints()).t;
+                let payload;
+                try {
+                    payload = JSON.parse(raw);
+                }
+                catch {
+                    return;
+                }
+                const pick = payload.kind === 'vault'
+                    ? vaultById.get(payload.id)
+                        ? { kind: 'vault', item: vaultById.get(payload.id) }
+                        : null
+                    : payload.kind === 'clip'
+                        ? { kind: 'clip', clipId: payload.clipId, title: payload.title || 'Clip' }
+                        : null;
+                if (!pick)
+                    return;
+                const v = await resolvePick(pick);
+                if (v)
+                    placeMedia(v, row === 'v1' ? 'insert' : 'top', t, track);
+            },
+        };
+    };
     const dragItem = (e, kind, id, mode) => {
         e.stopPropagation();
+        if (tool === 'blade' && tl) {
+            splitAt(snapTo(timeFromX(e.clientX), snapPoints(id)).t, { type: kind, id });
+            return;
+        }
         setSel({ type: kind, id });
         if (!tl)
             return;
+        const pts = snapPoints(id);
         const x0 = e.clientX;
         const y0 = e.clientY;
         const get = (t) => kind === 'overlay' ? t.overlays.find((o) => o.id === id) : kind === 'audio' ? t.audio.find((a) => a.id === id) : t.captions.find((c) => c.id === id);
@@ -1502,14 +2010,43 @@ export const NleEditorPage = ({ clipId }) => {
             moved = true;
             let s = s0;
             let en = e0;
+            let snapped = null;
             if (mode === 'move') {
-                s = clamp(s0 + dt, 0, total - (e0 - s0));
-                en = s + (e0 - s0);
+                const len = e0 - s0;
+                s = clamp(s0 + dt, 0, total - len);
+                en = s + len;
+                const a = snapTo(s, pts);
+                const b = snapTo(en, pts);
+                if (a.hit) {
+                    s = a.t;
+                    en = s + len;
+                    snapped = a.t;
+                }
+                else if (b.hit) {
+                    en = b.t;
+                    s = en - len;
+                    snapped = b.t;
+                }
             }
-            else if (mode === 'l')
-                s = clamp(s0 + dt, 0, e0 - 0.1);
-            else
-                en = clamp(e0 + dt, s0 + 0.1, total);
+            else if (mode === 'l') {
+                const a = snapTo(clamp(s0 + dt, 0, e0 - 0.1), pts);
+                s = clamp(a.t, 0, e0 - 0.1);
+                if (a.hit)
+                    snapped = a.t;
+            }
+            else {
+                const b = snapTo(clamp(e0 + dt, s0 + 0.1, total), pts);
+                en = clamp(b.t, s0 + 0.1, total);
+                if (b.hit)
+                    snapped = b.t;
+            }
+            setSnapLine(snapped);
+            const cut = e0 - s0 - (en - s);
+            setDragInfo({
+                x: ev.clientX,
+                y: ev.clientY,
+                text: mode === 'move' ? `${fmt(s)} → ${fmt(en)}` : `${(en - s).toFixed(1)} s${Math.abs(cut) > 0.04 ? ` · ${cut > 0 ? `${cut.toFixed(1)} s cut` : `+${(-cut).toFixed(1)} s`}` : ''}`,
+            });
             const cur = tlRef.current;
             // vertical drag moves between V2-V4 / A2-A4
             let track = it0.track;
@@ -1528,39 +2065,73 @@ export const NleEditorPage = ({ clipId }) => {
         const up = () => {
             window.removeEventListener('pointermove', mv);
             window.removeEventListener('pointerup', up);
+            setDragInfo(null);
+            setSnapLine(null);
             if (moved)
                 endLive();
         };
         window.addEventListener('pointermove', mv);
         window.addEventListener('pointerup', up);
     };
+    /**
+     * Trims a main-video clip by dragging its edge. The clip's start stays put; everything after it
+     * moves with the new length (ripple). The right edge snaps to the playhead and other clips.
+     */
     const trimBase = (e, id, side) => {
         e.stopPropagation();
         if (!tl)
             return;
+        if (tool === 'blade') {
+            splitAt(timeFromX(e.clientX), { type: 'base', id });
+            return;
+        }
         setSel({ type: 'base', id });
-        const s0 = tl.base.find((s) => s.id === id);
+        const t0 = tl;
+        const idx = t0.base.findIndex((s) => s.id === id);
+        const s0 = t0.base[idx];
+        const d0 = segDur(s0);
+        const end0 = baseStart(t0, idx) + d0;
+        const pts = snapPoints().filter((p) => Math.abs(p - end0) > 1e-3);
         const x0 = e.clientX;
-        const srcDur = meta?.source?.durationSec || 1e9;
+        const srcDur = (meta?.source?.offset || 0) + (meta?.source?.durationSec || 1e9);
+        let moved = false;
         const mv = (ev) => {
-            const dt = ((ev.clientX - x0) / pxPerSec) * (s0.kind === 'freeze' ? 1 : s0.speed);
-            const cur = tlRef.current;
-            const next = cur.base.map((s) => {
-                if (s.id !== id)
-                    return s;
-                if (s.kind === 'freeze')
-                    return { ...s, freezeDur: clamp((s0.freezeDur || 1) + (side === 'r' ? dt : -dt), 0.1, 30) };
-                if (side === 'l')
-                    return { ...s, srcIn: clamp(s0.srcIn + dt, 0, s0.srcOut - 0.1) };
-                const max = s.kind === 'asset' ? vaultById.get(s.assetId || '')?.durationSec || 1e9 : srcDur;
-                return { ...s, srcOut: clamp(s0.srcOut + dt, s0.srcIn + 0.1, max) };
-            });
-            live({ ...cur, base: next });
+            if (!moved && Math.abs(ev.clientX - x0) < 3)
+                return;
+            moved = true;
+            let dx = (ev.clientX - x0) / pxPerSec;
+            let snapped = null;
+            if (side === 'r') {
+                const hit = snapTo(end0 + dx, pts);
+                if (hit.hit) {
+                    dx = hit.t - end0;
+                    snapped = hit.t;
+                }
+            }
+            const dt = dx * (s0.kind === 'freeze' ? 1 : s0.speed);
+            let seg;
+            if (s0.kind === 'freeze')
+                seg = { ...s0, freezeDur: clamp((s0.freezeDur || 1) + (side === 'r' ? dt : -dt), 0.1, 30) };
+            else if (side === 'l')
+                seg = { ...s0, srcIn: clamp(s0.srcIn + dt, 0, s0.srcOut - 0.1) };
+            else {
+                const max = s0.kind === 'asset' ? vaultById.get(s0.assetId || '')?.durationSec || 1e9 : srcDur;
+                seg = { ...s0, srcOut: clamp(s0.srcOut + dt, s0.srcIn + 0.1, max) };
+            }
+            const d = segDur(seg);
+            const base = t0.base.map((s, i) => (i === idx ? seg : s));
+            live(rippleAfter({ ...t0, base }, end0, d - d0));
+            setSnapLine(snapped);
+            const cut = d0 - d;
+            setDragInfo({ x: ev.clientX, y: ev.clientY, text: `${d.toFixed(1)} s${Math.abs(cut) > 0.04 ? ` · ${cut > 0 ? `${cut.toFixed(1)} s cut` : `+${(-cut).toFixed(1)} s`}` : ''}` });
         };
         const up = () => {
             window.removeEventListener('pointermove', mv);
             window.removeEventListener('pointerup', up);
-            endLive();
+            setDragInfo(null);
+            setSnapLine(null);
+            if (moved)
+                endLive();
         };
         window.addEventListener('pointermove', mv);
         window.addEventListener('pointerup', up);
@@ -1577,30 +2148,46 @@ export const NleEditorPage = ({ clipId }) => {
     const selBase = sel?.type === 'base' ? tl.base.find((s) => s.id === sel.id) : null;
     const selCap = sel?.type === 'caption' ? tl.captions.find((c) => c.id === sel.id) : null;
     const kNow = selOverlay ? kfAt(selOverlay, T) : null;
+    const selInfo = selBase
+        ? {
+            label: selBase.kind === 'freeze' ? 'Freeze frame' : selBase.kind === 'asset' ? `Main video · ${vaultById.get(selBase.assetId || '')?.name || 'Inserted clip'}` : 'Main video · Gameplay',
+            dur: segDur(selBase),
+            color: selBase.kind === 'freeze' ? 'bg-sky-600' : selBase.kind === 'asset' ? 'bg-fuchsia-600' : 'bg-emerald-600',
+        }
+        : selOverlay
+            ? { label: `Overlay · ${vaultById.get(selOverlay.assetId)?.name || ''}`, dur: selOverlay.end - selOverlay.start, color: 'bg-violet-600' }
+            : selAudio
+                ? { label: `Sound · ${vaultById.get(selAudio.assetId)?.name || ''}`, dur: selAudio.end - selAudio.start, color: 'bg-orange-600' }
+                : selCap
+                    ? { label: `Text · “${selCap.text}”`, dur: selCap.endSec - selCap.startSec, color: 'bg-yellow-600' }
+                    : null;
     const width = Math.max(600, total * pxPerSec + 120);
     const segStarts = [];
     tl.base.reduce((acc, s) => (segStarts.push(acc), acc + segDur(s)), 0);
-    return (_jsxs("div", { className: "h-dvh w-full bg-zinc-950 text-white flex flex-col overflow-hidden select-none", children: [_jsx("video", { ref: sourceVideo, src: meta.source?.url ? `${API_BASE}${meta.source.url}` : undefined, crossOrigin: "anonymous", preload: "auto", playsInline: true, className: "hidden" }), _jsxs("header", { className: "h-12 bg-zinc-900 border-b border-zinc-800 px-3 flex items-center justify-between gap-2 shrink-0", children: [_jsxs("div", { className: "flex items-center gap-2 min-w-0", children: [_jsx("button", { onClick: () => navigate(`/project/${meta.clip.projectId}`), className: "p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400", "aria-label": "Back", children: _jsx(ArrowLeft, { className: "w-4 h-4" }) }), _jsxs("div", { className: "min-w-0", children: [_jsx("p", { className: "text-sm font-bold truncate", children: meta.clip.title }), _jsxs("p", { className: "text-[10px] text-zinc-500", children: ["1080\u00D71920 \u00B7 ", tl.fps, " fps \u00B7 ", fmt(total), dirty ? ' · unsaved' : ''] })] })] }), _jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("button", { onClick: undo, disabled: !past.length, className: "p-1.5 rounded-lg hover:bg-zinc-800 disabled:opacity-30", "aria-label": "Undo", children: _jsx(Undo2, { className: "w-4 h-4" }) }), _jsx("button", { onClick: redo, disabled: !future.length, className: "p-1.5 rounded-lg hover:bg-zinc-800 disabled:opacity-30", "aria-label": "Redo", children: _jsx(Redo2, { className: "w-4 h-4" }) }), _jsx("button", { onClick: save, disabled: !dirty, className: "px-3 py-1.5 rounded-lg border border-zinc-700 text-xs font-semibold disabled:opacity-40", children: "Save" }), _jsx("button", { onClick: exportClip, disabled: !!job && ['queued', 'rendering'].includes(job.status), className: "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-[#5b3bb5] to-fuchsia-600 disabled:opacity-70", children: job && ['queued', 'rendering'].includes(job.status) ? (_jsxs(_Fragment, { children: [_jsx(Loader2, { className: "w-3.5 h-3.5 animate-spin" }), " ", Math.round(job.progress * 100), "%"] })) : (_jsxs(_Fragment, { children: [_jsx(Download, { className: "w-3.5 h-3.5" }), " Export"] })) })] })] }), _jsxs("div", { className: "h-10 bg-zinc-900/70 border-b border-zinc-800 px-3 flex items-center gap-1.5 overflow-x-auto shrink-0", children: [_jsx("button", { onClick: memeIt, title: "One-click auto-edit of this goal: punch zoom, freeze + boom + sticker, instant replay, crowd roar", className: "flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[11px] font-bold whitespace-nowrap bg-gradient-to-r from-amber-500 to-pink-600", children: "\u2728 Meme it" }), _jsx(ToolBtn, { on: tool === 'select', onClick: () => setTool('select'), title: "Select / move (V)", children: _jsx(MousePointer2, { className: "w-3.5 h-3.5" }) }), _jsxs(ToolBtn, { onClick: splitAction, title: "Split V1 at playhead (B)", children: [_jsx(Scissors, { className: "w-3.5 h-3.5" }), " Split"] }), _jsx(ToolBtn, { onClick: () => insertCutaway(), title: "Insert selected vault meme as a cutaway at the playhead (S)", children: "Insert cutaway (S)" }), _jsxs(ToolBtn, { onClick: freezeAction, title: "Freeze frame for the selected meme/SFX duration (F)", children: [_jsx(Snowflake, { className: "w-3.5 h-3.5" }), " Freeze (F)"] }), _jsxs(ToolBtn, { on: tool === 'zoom', onClick: () => setTool(tool === 'zoom' ? 'select' : 'zoom'), title: "Click the canvas to punch-zoom there (Z)", children: [_jsx(ZoomIn, { className: "w-3.5 h-3.5" }), " Punch zoom"] }), _jsxs(ToolBtn, { on: tool === 'track', onClick: () => setTool(tool === 'track' ? 'select' : 'track'), title: "Select an overlay, then click the target to pin it (T)", children: [_jsx(Crosshair, { className: "w-3.5 h-3.5" }), " Track"] }), _jsx("span", { className: "w-px h-5 bg-zinc-800 mx-1" }), [0.25, 0.5, 1, 1.5, 2].map((s) => (_jsxs(ToolBtn, { onClick: () => setSpeed(s), title: `Set the V1 segment speed to ${s}x`, children: [s, "x"] }, s))), _jsx(ToolBtn, { onClick: () => setSpeed('punch'), title: "2x build-up into a 0.3x impact at the playhead", children: "\u26A1 Punch speed" }), tool !== 'select' && (_jsx("span", { className: "ml-2 text-[11px] text-amber-300 whitespace-nowrap", children: tool === 'zoom' ? 'Click the target on the canvas' : tool === 'track' ? (selOverlay ? 'Click the point to track' : 'Select an overlay first') : 'Click a colour on the overlay' }))] }), _jsxs("div", { className: "flex-1 min-h-0 flex overflow-hidden", children: [_jsxs("aside", { ...dropProps('vault'), className: `relative w-72 shrink-0 bg-zinc-900/50 border-r border-zinc-800 flex flex-col min-h-0 ${dropTarget === 'vault' ? 'ring-2 ring-inset ring-purple-500' : ''}`, children: [dropTarget === 'vault' && (_jsx("div", { className: "absolute inset-0 z-20 bg-purple-950/70 flex items-center justify-center text-sm font-semibold pointer-events-none", children: "Drop to upload to your vault" })), _jsx("div", { className: "flex gap-1 p-2 border-b border-zinc-800", children: ['vault', 'captions'].map((d) => (_jsx("button", { onClick: () => setDrawer(d), className: `flex-1 py-1.5 rounded-lg text-xs font-semibold capitalize ${drawer === d ? 'bg-zinc-800' : 'text-zinc-400'}`, children: d === 'vault' ? 'Meme vault' : 'Captions' }, d))) }), drawer === 'vault' ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "p-2 space-y-2 border-b border-zinc-800", children: [_jsxs("div", { className: "flex gap-1.5", children: [_jsx("input", { value: vaultQ, onChange: (e) => setVaultQ(e.target.value), placeholder: "Search memes & SFX\u2026", className: "flex-1 min-w-0 bg-zinc-800 rounded-lg px-2.5 py-1.5 text-xs outline-none select-text" }), _jsxs("label", { className: "p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 cursor-pointer", title: "Upload video, GIF, PNG or audio", children: [_jsx(Upload, { className: "w-4 h-4" }), _jsx("input", { type: "file", multiple: true, accept: UPLOAD_ACCEPT, className: "hidden", onChange: (e) => { onUpload(e.target.files); e.target.value = ''; } })] })] }), _jsx("div", { className: "flex flex-wrap gap-1", children: ['All', 'Favorites', 'Reactions', 'Green Screens', 'Rage', 'Sound Effects', 'Anime/Gaming'].map((c) => (_jsx("button", { onClick: () => setVaultCat(c), className: `px-2 py-0.5 rounded-full text-[10px] font-semibold ${vaultCat === c ? 'bg-[#5b3bb5]' : 'bg-zinc-800 text-zinc-400'}`, children: c }, c))) })] }), _jsxs("div", { className: "flex-1 overflow-y-auto p-2 grid grid-cols-2 gap-2 content-start", children: [filteredVault.map((v) => (_jsxs("div", { onClick: () => setVaultSel(v.id === vaultSel ? null : v.id), onDoubleClick: () => {
-                                                    commit(stampAsset(tl, v, clock.current.T));
-                                                    setToast(`Added "${v.name}" at ${fmt(clock.current.T)}`);
-                                                }, className: `rounded-lg bg-zinc-800/80 p-1.5 cursor-pointer border ${vaultSel === v.id ? 'border-purple-400' : 'border-transparent'}`, title: "Click to select \u00B7 double-click to drop at the playhead", children: [_jsxs("div", { className: "relative h-16 rounded-md bg-[conic-gradient(#3f3f46_25%,#27272a_0_50%,#3f3f46_0_75%,#27272a_0)] bg-[length:12px_12px] overflow-hidden flex items-center justify-center", children: [v.kind === 'audio' ? (_jsx("span", { className: "text-2xl", children: "\uD83D\uDD0A" })) : v.kind === 'video' ? (_jsx("video", { src: `${API_BASE}${v.url}#t=0.5`, muted: true, preload: "metadata", className: "max-h-full max-w-full" })) : (_jsx("img", { src: `${API_BASE}${v.url}`, alt: "", className: "max-h-full max-w-full" })), v.hotkey && _jsx("span", { className: "absolute top-1 left-1 text-[10px] font-black bg-black/70 rounded px-1", children: v.hotkey }), _jsx("button", { onClick: (e) => {
+    return (_jsxs("div", { className: "h-dvh w-full bg-zinc-950 text-white flex flex-col overflow-hidden select-none", children: [_jsx("video", { ref: sourceVideo, src: meta.source?.url ? `${API_BASE}${meta.source.url}` : undefined, crossOrigin: "anonymous", preload: "auto", playsInline: true, className: "hidden" }), _jsxs("header", { className: "h-12 bg-zinc-900 border-b border-zinc-800 px-3 flex items-center justify-between gap-2 shrink-0", children: [_jsxs("div", { className: "flex items-center gap-2 min-w-0", children: [_jsx("button", { onClick: () => navigate(`/project/${meta.clip.projectId}`), className: "p-1.5 rounded-lg hover:bg-zinc-800 text-zinc-400", "aria-label": "Back", children: _jsx(ArrowLeft, { className: "w-4 h-4" }) }), _jsxs("div", { className: "min-w-0", children: [_jsx("p", { className: "text-sm font-bold truncate", children: meta.clip.title }), _jsxs("p", { className: "text-[10px] text-zinc-500", children: ["1080\u00D71920 \u00B7 ", tl.fps, " fps \u00B7 ", fmt(total), dirty ? ' · unsaved' : ''] })] })] }), _jsxs("div", { className: "flex items-center gap-1.5", children: [_jsx("button", { onClick: undo, disabled: !past.length, className: "p-1.5 rounded-lg hover:bg-zinc-800 disabled:opacity-30", "aria-label": "Undo", children: _jsx(Undo2, { className: "w-4 h-4" }) }), _jsx("button", { onClick: redo, disabled: !future.length, className: "p-1.5 rounded-lg hover:bg-zinc-800 disabled:opacity-30", "aria-label": "Redo", children: _jsx(Redo2, { className: "w-4 h-4" }) }), _jsx("button", { onClick: save, disabled: !dirty, className: "px-3 py-1.5 rounded-lg border border-zinc-700 text-xs font-semibold disabled:opacity-40", children: "Save" }), _jsx("button", { onClick: exportClip, disabled: !!job && ['queued', 'rendering'].includes(job.status), className: "flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-gradient-to-r from-[#5b3bb5] to-fuchsia-600 disabled:opacity-70", children: job && ['queued', 'rendering'].includes(job.status) ? (_jsxs(_Fragment, { children: [_jsx(Loader2, { className: "w-3.5 h-3.5 animate-spin" }), " ", Math.round(job.progress * 100), "%"] })) : (_jsxs(_Fragment, { children: [_jsx(Download, { className: "w-3.5 h-3.5" }), " Export"] })) })] })] }), _jsxs("div", { className: "h-11 bg-zinc-900/70 border-b border-zinc-800 px-2 sm:px-3 flex items-center gap-1.5 shrink-0", children: [_jsxs("div", { className: "flex items-center gap-1.5 overflow-x-auto no-scrollbar min-w-0", children: [_jsx("button", { onClick: memeIt, title: "One-click auto-edit: punch zoom, freeze + boom + sticker, instant replay, crowd roar", className: "flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[11px] font-bold whitespace-nowrap bg-gradient-to-r from-amber-500 to-pink-600", children: "\u2728 Meme it" }), _jsx("span", { className: "w-px h-5 bg-zinc-800 mx-0.5 shrink-0" }), _jsx(ToolBtn, { on: tool === 'select', onClick: () => setTool('select'), title: "Select and move clips (V)", children: _jsx(MousePointer2, { className: "w-3.5 h-3.5" }) }), _jsxs(ToolBtn, { on: tool === 'blade', onClick: () => setTool(tool === 'blade' ? 'select' : 'blade'), title: "Blade: click any clip on the timeline to cut it there (C)", children: [_jsx(Scissors, { className: "w-3.5 h-3.5" }), " Blade"] }), _jsx("span", { className: "w-px h-5 bg-zinc-800 mx-0.5 shrink-0" }), _jsxs(ToolBtn, { onClick: splitAction, title: sel ? 'Split the selected clip at the playhead (B)' : 'Split the main video at the playhead (B)', children: [_jsx(SquareSplitHorizontal, { className: "w-3.5 h-3.5" }), " Split"] }), _jsxs(ToolBtn, { onClick: deleteSelected, disabled: !sel || (sel.type === 'base' && tl.base.length <= 1), danger: true, title: "Delete the selected clip (Delete)", children: [_jsx(Trash2, { className: "w-3.5 h-3.5" }), " Delete"] }), _jsx("span", { className: "w-px h-5 bg-zinc-800 mx-0.5 shrink-0" }), _jsxs("button", { onClick: () => setAddSheet({ mode: 'insert' }), title: "Add a clip, a moment of the original video, an upload or a meme (A)", className: "flex items-center gap-1 px-2.5 py-1.5 rounded-md text-[11px] font-bold whitespace-nowrap bg-gradient-to-r from-[#5b3bb5] to-fuchsia-600", children: [_jsx(Plus, { className: "w-3.5 h-3.5" }), " Add media"] }), _jsx("span", { className: "w-px h-5 bg-zinc-800 mx-0.5 shrink-0" }), _jsxs("button", { onClick: (e) => {
+                                    const r = e.currentTarget.getBoundingClientRect();
+                                    setMenu(menu?.id === 'speed' ? null : { id: 'speed', x: r.left, y: r.bottom + 4 });
+                                }, title: "Speed of the selected (or current) main-video clip", className: `flex items-center gap-1 px-2 py-1.5 rounded-md text-[11px] font-semibold whitespace-nowrap ${menu?.id === 'speed' ? 'bg-[#5b3bb5] text-white' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200'}`, children: [_jsx(Gauge, { className: "w-3.5 h-3.5" }), " Speed ", _jsx(ChevronDown, { className: "w-3 h-3" })] }), _jsxs(ToolBtn, { onClick: freezeAction, title: "Freeze the frame at the playhead (F)", children: [_jsx(Snowflake, { className: "w-3.5 h-3.5" }), " Freeze"] }), _jsxs("button", { onClick: (e) => {
+                                    const r = e.currentTarget.getBoundingClientRect();
+                                    setMenu(menu?.id === 'more' ? null : { id: 'more', x: Math.min(r.left, window.innerWidth - 268), y: r.bottom + 4 });
+                                }, title: "More tools", className: `flex items-center gap-1 px-2 py-1.5 rounded-md text-[11px] font-semibold whitespace-nowrap ${menu?.id === 'more' ? 'bg-[#5b3bb5] text-white' : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-200'}`, children: [_jsx(MoreHorizontal, { className: "w-3.5 h-3.5" }), " More"] }), (markIn !== null || markOut !== null) && (_jsxs("button", { onClick: () => (setMarkIn(null), setMarkOut(null)), title: "Clear the marked range", className: "text-[10px] text-amber-300 hover:text-white whitespace-nowrap px-1", children: ["Marked ", markIn !== null ? fmt(markIn) : '–', " \u2192 ", markOut !== null ? fmt(markOut) : '–', " \u2715"] }))] }), tool !== 'select' && (_jsx("span", { className: "ml-auto pl-2 text-[11px] text-amber-300 whitespace-nowrap hidden md:block", children: tool === 'blade' ? 'Click a clip to cut it · Esc to stop' : tool === 'zoom' ? 'Click the target on the canvas' : tool === 'track' ? (selOverlay ? 'Click the point to track' : 'Select an overlay first') : 'Click a colour on the overlay' }))] }), menu && (_jsxs(_Fragment, { children: [_jsx("div", { className: "fixed inset-0 z-[58]", onClick: () => setMenu(null) }), _jsx("div", { className: "fixed z-[59] w-64 bg-zinc-900 border border-zinc-700 rounded-xl shadow-2xl p-1.5 text-[12px]", style: { left: menu.x, top: menu.y }, children: menu.id === 'speed' ? (_jsxs(_Fragment, { children: [_jsx("p", { className: "px-2 py-1 text-[10px] font-bold uppercase text-zinc-500", children: selBase ? 'Selected clip' : 'Clip under the playhead' }), _jsx("div", { className: "grid grid-cols-5 gap-1 p-1", children: [0.25, 0.5, 1, 1.5, 2].map((v) => (_jsxs("button", { onClick: () => { setSpeed(v); setMenu(null); }, className: "py-1.5 rounded-md bg-zinc-800 hover:bg-[#5b3bb5] font-semibold", children: [v, "x"] }, v))) }), _jsxs("button", { onClick: () => { setSpeed('punch'); setMenu(null); }, className: "w-full text-left px-2 py-1.5 rounded-md hover:bg-zinc-800", children: ["\u26A1 Punch speed ", _jsx("span", { className: "text-zinc-500", children: "\u00B7 fast build-up, slow-mo hit" })] })] })) : (_jsxs(_Fragment, { children: [_jsx("p", { className: "px-2 pt-1 pb-0.5 text-[10px] font-bold uppercase text-zinc-500", children: "Mark a part of the video" }), _jsxs("button", { onClick: () => { setMarkIn(clock.current.T); setMenu(null); }, className: "w-full text-left px-2 py-1.5 rounded-md hover:bg-zinc-800", children: ["Mark start here ", _jsx("kbd", { className: "float-right text-zinc-500", children: "I" })] }), _jsxs("button", { onClick: () => { setMarkOut(clock.current.T); setMenu(null); }, className: "w-full text-left px-2 py-1.5 rounded-md hover:bg-zinc-800", children: ["Mark end here ", _jsx("kbd", { className: "float-right text-zinc-500", children: "O" })] }), _jsxs("button", { onClick: () => { setMenu(null); markIn !== null && markOut !== null ? cutRange(markIn, markOut, 'Cut the marked part') : setToast('Mark a start and an end first'); }, className: "w-full text-left px-2 py-1.5 rounded-md hover:bg-zinc-800", children: ["Cut out the marked part ", _jsx("kbd", { className: "float-right text-zinc-500", children: "X" })] }), _jsx("button", { onClick: () => { setMenu(null); keepRange(); }, className: "w-full text-left px-2 py-1.5 rounded-md hover:bg-zinc-800", children: "Keep only the marked part" }), _jsx("p", { className: "px-2 pt-2 pb-0.5 text-[10px] font-bold uppercase text-zinc-500 border-t border-zinc-800 mt-1", children: "Whole video" }), _jsx("button", { onClick: () => { setMenu(null); trimToPlayhead('start'); }, className: "w-full text-left px-2 py-1.5 rounded-md hover:bg-zinc-800", children: "Delete everything before the playhead" }), _jsx("button", { onClick: () => { setMenu(null); trimToPlayhead('end'); }, className: "w-full text-left px-2 py-1.5 rounded-md hover:bg-zinc-800", children: "Delete everything after the playhead" }), _jsxs("div", { className: "flex items-center gap-2 px-2 py-1.5", children: [_jsx("button", { onClick: () => { setMenu(null); sliceAction(); }, className: "hover:underline", children: "Cut the current clip into" }), _jsx("input", { type: "number", min: 2, max: 12, value: sliceN, onChange: (e) => setSliceN(clamp(Math.round(Number(e.target.value) || 2), 2, 12)), "aria-label": "Number of parts", className: "w-12 px-1 py-0.5 rounded bg-zinc-800 text-center" }), _jsx("span", { children: "parts" })] }), _jsx("p", { className: "px-2 pt-2 pb-0.5 text-[10px] font-bold uppercase text-zinc-500 border-t border-zinc-800 mt-1", children: "Effects" }), _jsxs("button", { onClick: () => { setMenu(null); setTool('zoom'); }, className: "w-full text-left px-2 py-1.5 rounded-md hover:bg-zinc-800 flex items-center gap-1.5", children: [_jsx(ZoomIn, { className: "w-3.5 h-3.5" }), " Punch zoom ", _jsx("kbd", { className: "ml-auto text-zinc-500", children: "Z" })] }), _jsxs("button", { onClick: () => { setMenu(null); setTool('track'); }, className: "w-full text-left px-2 py-1.5 rounded-md hover:bg-zinc-800 flex items-center gap-1.5", children: [_jsx(Crosshair, { className: "w-3.5 h-3.5" }), " Make an overlay follow something ", _jsx("kbd", { className: "ml-auto text-zinc-500", children: "T" })] })] })) })] })), selInfo && (_jsxs("div", { className: "h-10 bg-zinc-950 border-b border-zinc-800 px-2 sm:px-3 flex items-center gap-1.5 overflow-x-auto no-scrollbar shrink-0", children: [_jsxs("span", { className: "flex items-center gap-1.5 text-[11px] font-semibold text-zinc-200 whitespace-nowrap mr-1 max-w-[220px]", children: [_jsx("span", { className: `w-2.5 h-2.5 rounded-sm shrink-0 ${selInfo.color}` }), _jsx("span", { className: "truncate", children: selInfo.label }), _jsxs("span", { className: "text-zinc-500 font-mono", children: [selInfo.dur.toFixed(1), "s"] })] }), _jsxs(ToolBtn, { onClick: splitAction, title: "Split this clip at the playhead (B)", children: [_jsx(SquareSplitHorizontal, { className: "w-3.5 h-3.5" }), " Split here"] }), _jsxs(ToolBtn, { onClick: () => trimSelected('left'), title: "Delete the part of this clip before the playhead (Q)", children: [_jsx(ArrowLeftToLine, { className: "w-3.5 h-3.5" }), " Trim start"] }), _jsxs(ToolBtn, { onClick: () => trimSelected('right'), title: "Delete the part of this clip after the playhead (W)", children: ["Trim end ", _jsx(ArrowRightToLine, { className: "w-3.5 h-3.5" })] }), _jsxs(ToolBtn, { onClick: duplicateSelected, title: "Copy this clip right after itself (D)", children: [_jsx(Copy, { className: "w-3.5 h-3.5" }), " Duplicate"] }), (sel?.type === 'base' || sel?.type === 'overlay') && (_jsxs(ToolBtn, { onClick: () => setAddSheet({ mode: 'replace' }), title: "Swap this clip for another clip, video or image", children: [_jsx(Replace, { className: "w-3.5 h-3.5" }), " Replace"] })), _jsxs(ToolBtn, { onClick: deleteSelected, danger: true, disabled: sel?.type === 'base' && tl.base.length <= 1, title: "Delete this clip (Delete)", children: [_jsx(Trash2, { className: "w-3.5 h-3.5" }), " Delete"] }), _jsx("button", { onClick: () => setSel(null), className: "ml-auto pl-2 text-[11px] font-semibold text-zinc-400 hover:text-white whitespace-nowrap", children: "Done" })] })), _jsxs("div", { className: "flex-1 min-h-0 flex overflow-hidden", children: [phonePanel && _jsx("div", { className: "md:hidden fixed inset-0 z-[55] bg-black/60", onClick: () => setPhonePanel(null) }), _jsxs("aside", { ...dropProps('vault'), className: `${phonePanel === 'drawer' ? 'fixed inset-x-0 bottom-0 z-[56] h-[65dvh] rounded-t-2xl bg-zinc-900 flex' : 'hidden'} md:relative md:inset-auto md:z-auto md:h-auto md:rounded-none md:flex md:w-72 md:bg-zinc-900/50 shrink-0 border-r border-zinc-800 flex-col min-h-0 ${dropTarget === 'vault' ? 'ring-2 ring-inset ring-purple-500' : ''}`, children: [_jsxs("div", { className: "md:hidden flex items-center justify-between px-3 pt-2", children: [_jsx("span", { className: "mx-auto w-10 h-1 rounded-full bg-zinc-700" }), _jsx("button", { onClick: () => setPhonePanel(null), className: "absolute right-3 top-2 text-xs font-semibold text-zinc-400", children: "Close" })] }), dropTarget === 'vault' && (_jsx("div", { className: "absolute inset-0 z-20 bg-purple-950/70 flex items-center justify-center text-sm font-semibold pointer-events-none", children: "Drop to upload to your vault" })), _jsx("div", { className: "flex gap-1 p-2 border-b border-zinc-800", children: ['vault', 'captions'].map((d) => (_jsx("button", { onClick: () => setDrawer(d), className: `flex-1 py-1.5 rounded-lg text-xs font-semibold capitalize ${drawer === d ? 'bg-zinc-800' : 'text-zinc-400'}`, children: d === 'vault' ? 'Meme vault' : 'Captions' }, d))) }), drawer === 'vault' ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "p-2 space-y-2 border-b border-zinc-800", children: [_jsxs("div", { className: "flex gap-1.5", children: [_jsx("input", { value: vaultQ, onChange: (e) => setVaultQ(e.target.value), placeholder: "Search memes & SFX\u2026", className: "flex-1 min-w-0 bg-zinc-800 rounded-lg px-2.5 py-1.5 text-xs outline-none select-text" }), _jsxs("label", { className: "p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 cursor-pointer", title: "Upload video, GIF, PNG or audio", children: [_jsx(Upload, { className: "w-4 h-4" }), _jsx("input", { type: "file", multiple: true, accept: UPLOAD_ACCEPT, className: "hidden", onChange: (e) => { onUpload(e.target.files); e.target.value = ''; } })] })] }), _jsx("div", { className: "flex flex-wrap gap-1", children: ['All', 'Favorites', 'Clips', 'Reactions', 'Green Screens', 'Rage', 'Sound Effects', 'Anime/Gaming'].map((c) => (_jsx("button", { onClick: () => setVaultCat(c), className: `px-2 py-0.5 rounded-full text-[10px] font-semibold ${vaultCat === c ? 'bg-[#5b3bb5]' : 'bg-zinc-800 text-zinc-400'}`, children: c }, c))) })] }), _jsxs("div", { className: "flex-1 overflow-y-auto p-2 grid grid-cols-2 gap-2 content-start", children: [filteredVault.map((v) => (_jsxs("div", { onClick: () => setVaultSel(v.id === vaultSel ? null : v.id), onDoubleClick: () => placeMedia(v, 'top'), draggable: true, onDragStart: (e) => {
+                                                    e.dataTransfer.setData(MEDIA_DRAG_TYPE, JSON.stringify({ kind: 'vault', id: v.id }));
+                                                    e.dataTransfer.effectAllowed = 'copy';
+                                                }, className: `rounded-lg bg-zinc-800/80 p-1.5 cursor-pointer border ${vaultSel === v.id ? 'border-purple-400' : 'border-transparent'}`, title: "Click to select \u00B7 drag onto the timeline \u00B7 double-click to put it on top at the playhead", children: [_jsxs("div", { className: "relative h-16 rounded-md bg-[conic-gradient(#3f3f46_25%,#27272a_0_50%,#3f3f46_0_75%,#27272a_0)] bg-[length:12px_12px] overflow-hidden flex items-center justify-center", children: [v.kind === 'audio' ? (_jsx("span", { className: "text-2xl", children: "\uD83D\uDD0A" })) : v.kind === 'video' ? (_jsx("video", { src: `${API_BASE}${v.url}#t=0.5`, muted: true, preload: "metadata", className: "max-h-full max-w-full" })) : (_jsx("img", { src: `${API_BASE}${v.url}`, alt: "", className: "max-h-full max-w-full" })), v.hotkey && _jsx("span", { className: "absolute top-1 left-1 text-[10px] font-black bg-black/70 rounded px-1", children: v.hotkey }), _jsx("button", { onClick: (e) => {
                                                                     e.stopPropagation();
                                                                     patchVault(v.id, { favorite: !v.favorite });
-                                                                }, className: "absolute top-1 right-1", "aria-label": "Favourite", children: _jsx(Star, { className: `w-3.5 h-3.5 ${v.favorite ? 'fill-amber-400 text-amber-400' : 'text-zinc-400'}` }) })] }), _jsx("p", { className: "text-[10px] font-semibold truncate mt-1", children: v.name }), _jsxs("div", { className: "flex items-center justify-between text-[9px] text-zinc-500", children: [_jsxs("span", { children: [v.kind, " \u00B7 ", v.durationSec.toFixed(1), "s"] }), _jsxs("select", { value: v.hotkey ?? '', onClick: (e) => e.stopPropagation(), onChange: (e) => patchVault(v.id, { hotkey: e.target.value ? Number(e.target.value) : null }), className: "bg-zinc-900 rounded text-[9px]", title: "Hotkey", children: [_jsx("option", { value: "", children: "key" }), [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => _jsx("option", { value: n, children: n }, n))] })] }), _jsxs("div", { className: "mt-1 flex gap-1", children: [_jsx("button", { onClick: (e) => {
+                                                                }, className: "absolute top-1 right-1", "aria-label": "Favourite", children: _jsx(Star, { className: `w-3.5 h-3.5 ${v.favorite ? 'fill-amber-400 text-amber-400' : 'text-zinc-400'}` }) })] }), _jsx("p", { className: "text-[10px] font-semibold truncate mt-1", children: v.name }), _jsxs("div", { className: "flex items-center justify-between text-[9px] text-zinc-500", children: [_jsxs("span", { children: [v.kind, " \u00B7 ", v.durationSec.toFixed(1), "s"] }), _jsxs("select", { value: v.hotkey ?? '', onClick: (e) => e.stopPropagation(), onChange: (e) => patchVault(v.id, { hotkey: e.target.value ? Number(e.target.value) : null }), className: "bg-zinc-900 rounded text-[9px]", title: "Hotkey", children: [_jsx("option", { value: "", children: "key" }), [1, 2, 3, 4, 5, 6, 7, 8, 9].map((n) => _jsx("option", { value: n, children: n }, n))] })] }), _jsxs("div", { className: "mt-1 flex gap-1", children: [_jsxs("button", { onClick: (e) => {
                                                                     e.stopPropagation();
-                                                                    commit(stampAsset(tl, v, clock.current.T));
-                                                                    setToast(`Added "${v.name}" at ${fmt(clock.current.T)}`);
-                                                                }, className: "flex-1 text-[10px] font-bold py-0.5 rounded bg-[#5b3bb5] hover:bg-[#6d4ad0]", title: v.kind === 'audio' ? 'Add as a sound effect at the playhead' : 'Add as an overlay / sticker at the playhead', children: "+ Add" }), v.kind !== 'audio' && (_jsx("button", { onClick: (e) => {
-                                                                    e.stopPropagation();
-                                                                    insertCutaway(v);
-                                                                }, className: "flex-1 text-[10px] font-semibold py-0.5 rounded bg-zinc-700 hover:bg-zinc-600", title: "Cut to this full-screen at the playhead (gameplay shifts forward)", children: "Cutaway" })), _jsx("button", { onClick: (e) => {
+                                                                    setMenuFor(null);
+                                                                    setAddMenuFor(addMenuFor === v.id ? null : v.id);
+                                                                }, className: "flex-1 flex items-center justify-center gap-0.5 text-[10px] font-bold py-0.5 rounded bg-[#5b3bb5] hover:bg-[#6d4ad0]", title: "Choose where to add it", children: ["Add ", _jsx(ChevronDown, { className: "w-3 h-3" })] }), _jsx("button", { onClick: (e) => {
                                                                     e.stopPropagation();
                                                                     setMenuFor(menuFor === v.id ? null : v.id);
-                                                                }, className: "px-1.5 text-[11px] rounded bg-zinc-700 hover:bg-zinc-600", "aria-label": "More", children: "\u22EF" })] }), menuFor === v.id && (_jsxs("div", { onClick: (e) => e.stopPropagation(), className: "mt-1 space-y-1 rounded bg-zinc-900 p-1.5", children: [_jsx("button", { onClick: () => {
+                                                                }, className: "px-1.5 text-[11px] rounded bg-zinc-700 hover:bg-zinc-600", "aria-label": "More", children: "\u22EF" })] }), addMenuFor === v.id && (_jsx("div", { onClick: (e) => e.stopPropagation(), className: "mt-1 space-y-0.5 rounded bg-zinc-900 p-1", children: v.kind === 'audio' ? (_jsx("button", { onClick: () => { setAddMenuFor(null); placeMedia(v, 'top'); }, className: "w-full text-left text-[10px] px-1.5 py-1 rounded hover:bg-zinc-800", children: "Add sound at playhead" })) : (_jsxs(_Fragment, { children: [_jsx("button", { onClick: () => { setAddMenuFor(null); placeMedia(v, 'insert'); }, className: "w-full text-left text-[10px] px-1.5 py-1 rounded hover:bg-zinc-800", children: "Insert at playhead" }), _jsx("button", { onClick: () => { setAddMenuFor(null); placeMedia(v, 'top'); }, className: "w-full text-left text-[10px] px-1.5 py-1 rounded hover:bg-zinc-800", children: "Put on top" }), (sel?.type === 'base' || sel?.type === 'overlay') && (_jsx("button", { onClick: () => { setAddMenuFor(null); placeMedia(v, 'replace'); }, className: "w-full text-left text-[10px] px-1.5 py-1 rounded hover:bg-zinc-800", children: "Replace selected clip" }))] })) })), menuFor === v.id && (_jsxs("div", { onClick: (e) => e.stopPropagation(), className: "mt-1 space-y-1 rounded bg-zinc-900 p-1.5", children: [_jsx("button", { onClick: () => {
                                                                     const name = window.prompt('Rename', v.name);
                                                                     if (name && name.trim())
                                                                         patchVault(v.id, { name: name.trim() });
-                                                                }, className: "w-full text-left text-[10px] px-1.5 py-0.5 rounded hover:bg-zinc-800", children: "Rename" }), _jsx("select", { value: v.category, onChange: (e) => patchVault(v.id, { category: e.target.value }), className: "w-full bg-zinc-800 rounded text-[10px] py-0.5", children: ['Reactions', 'Green Screens', 'Rage', 'Sound Effects', 'Anime/Gaming'].map((c) => (_jsx("option", { value: c, children: c }, c))) }), v.kind === 'video' && !v.hasAlpha && (_jsxs("button", { onClick: () => aiCutout(v), className: "w-full flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded hover:bg-zinc-800", children: [_jsx(Wand2, { className: "w-3 h-3" }), " Remove background (AI)"] })), _jsx("button", { onClick: () => deleteVaultItem(v), className: "w-full text-left text-[10px] px-1.5 py-0.5 rounded hover:bg-rose-950 text-rose-400", children: "Delete from vault" })] }))] }, v.id))), filteredVault.length === 0 && (_jsxs("label", { className: "col-span-2 m-1 flex flex-col items-center gap-1 rounded-lg border border-dashed border-zinc-700 p-4 text-center text-[11px] text-zinc-400 cursor-pointer hover:border-purple-500", children: [_jsx(Upload, { className: "w-5 h-5" }), " Upload or drop your memes, stickers, images & sounds", _jsx("input", { type: "file", multiple: true, accept: UPLOAD_ACCEPT, className: "hidden", onChange: (e) => { onUpload(e.target.files); e.target.value = ''; } })] }))] }), _jsx("p", { className: "p-2 text-[10px] text-zinc-500 border-t border-zinc-800", children: "Drag files here or onto the video \u00B7 MP4, MOV, WebM, GIF, PNG, JPG, WebP, HEIC, MP3, WAV\u2026 (max 300 MB). Transparent videos keep alpha but not audio. Keys 1\u20139 stamp favourites." })] })) : (_jsx("div", { className: "flex-1 overflow-y-auto p-2 space-y-3", children: capLib &&
+                                                                }, className: "w-full text-left text-[10px] px-1.5 py-0.5 rounded hover:bg-zinc-800", children: "Rename" }), _jsx("select", { value: v.category, onChange: (e) => patchVault(v.id, { category: e.target.value }), className: "w-full bg-zinc-800 rounded text-[10px] py-0.5", children: ['Reactions', 'Green Screens', 'Rage', 'Sound Effects', 'Anime/Gaming', 'Clips'].map((c) => (_jsx("option", { value: c, children: c }, c))) }), v.kind === 'video' && !v.hasAlpha && (_jsxs("button", { onClick: () => aiCutout(v), className: "w-full flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded hover:bg-zinc-800", children: [_jsx(Wand2, { className: "w-3 h-3" }), " Remove background (AI)"] })), _jsx("button", { onClick: () => deleteVaultItem(v), className: "w-full text-left text-[10px] px-1.5 py-0.5 rounded hover:bg-rose-950 text-rose-400", children: "Delete from vault" })] }))] }, v.id))), filteredVault.length === 0 && (_jsxs("label", { className: "col-span-2 m-1 flex flex-col items-center gap-1 rounded-lg border border-dashed border-zinc-700 p-4 text-center text-[11px] text-zinc-400 cursor-pointer hover:border-purple-500", children: [_jsx(Upload, { className: "w-5 h-5" }), " Upload or drop your memes, stickers, images & sounds", _jsx("input", { type: "file", multiple: true, accept: UPLOAD_ACCEPT, className: "hidden", onChange: (e) => { onUpload(e.target.files); e.target.value = ''; } })] }))] }), _jsx("p", { className: "p-2 text-[10px] text-zinc-500 border-t border-zinc-800", children: "Drag files here or onto the video \u00B7 MP4, MOV, WebM, GIF, PNG, JPG, WebP, HEIC, MP3, WAV\u2026 (max 300 MB). Transparent videos keep alpha but not audio. Keys 1\u20139 stamp favourites." })] })) : (_jsx("div", { className: "flex-1 overflow-y-auto p-2 space-y-3", children: capLib &&
                                     [
                                         ['Hooks', capLib.hooks, { style: 'pill', color: '#7c3aed', size: 0.058, yFrac: 0.16, anim: 'pop' }],
                                         ['Headlines', capLib.headlines, { style: 'impact', color: '#ffffff', size: 0.085, yFrac: 0.4, anim: 'pop' }],
@@ -1609,26 +2196,26 @@ export const NleEditorPage = ({ clipId }) => {
                                                     const c = { id: uid('cap'), text, startSec: clock.current.T, endSec: Math.min(total, clock.current.T + 3), xFrac: 0.5, ...preset };
                                                     commit({ ...tl, captions: [...tl.captions, c] });
                                                     setSel({ type: 'caption', id: c.id });
-                                                }, className: "w-full text-left text-[11px] px-2 py-1.5 rounded-md bg-zinc-800/70 hover:bg-zinc-700", children: text }, text)))] }, title))) }))] }), _jsx("main", { className: "flex-1 min-w-0 flex items-center justify-center p-3 bg-black/40", children: _jsxs("div", { ref: previewRef, ...dropProps('canvas'), className: `relative h-full max-h-full aspect-[9/16] rounded-lg overflow-hidden shadow-2xl bg-black ${dropTarget === 'canvas' ? 'ring-4 ring-purple-500' : ''}`, children: [dropTarget === 'canvas' && (_jsxs("div", { className: "absolute inset-0 z-20 bg-purple-950/60 flex items-center justify-center text-sm font-semibold text-center px-6 pointer-events-none", children: ["Drop to add here at ", fmt(T)] })), _jsx("canvas", { ref: canvasRef, width: PW, height: PH, onClick: onCanvasClick, onPointerDown: onCanvasPointerDown, className: `absolute inset-0 w-full h-full ${tool === 'select' ? 'cursor-default' : 'cursor-crosshair'}` }), tl.captions
-                                    .filter((c) => T >= c.startSec && T < c.endSec)
-                                    .map((c) => (_jsx("div", { className: "absolute pointer-events-none", style: { left: `${(c.xFrac ?? 0.5) * 100}%`, top: `${c.yFrac * 100}%`, transform: 'translate(-50%,-50%)' }, children: _jsx(CaptionVisual, { cue: c, frameW: previewW }) }, `${c.id}-${c.startSec}`))), sourceStatus === 'downloading' && (_jsxs("div", { className: "absolute inset-0 z-10 bg-black/70 flex flex-col items-center justify-center text-center text-xs gap-2 px-6", children: [_jsx(Loader2, { className: "w-5 h-5 animate-spin" }), _jsx("p", { className: "font-semibold", children: "Downloading the HD video for this clip\u2026" }), _jsx("p", { className: "text-zinc-400", children: "First time only (about a minute). You can already edit the timeline, captions and vault." })] })), sourceStatus === 'failed' && (_jsxs("div", { className: "absolute inset-0 z-10 bg-black/80 flex flex-col items-center justify-center text-center text-xs gap-3 px-6", children: [_jsx("p", { className: "font-semibold text-rose-300", children: meta?.source?.error || 'Couldn’t download the HD video.' }), _jsx("button", { onClick: retrySource, className: "px-3 py-1.5 rounded-lg bg-[#5b3bb5] font-semibold", children: "Retry download" })] })), busy && (_jsxs("div", { className: "absolute inset-0 bg-black/60 flex items-center justify-center text-xs gap-2", children: [_jsx(Loader2, { className: "w-4 h-4 animate-spin" }), " ", busy] }))] }) }), _jsx("aside", { className: "w-72 shrink-0 min-h-0 bg-zinc-900/50 border-l border-zinc-800 overflow-y-auto p-3 space-y-3 text-xs", children: selOverlay && kNow ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsxs("p", { className: "font-bold uppercase tracking-wider text-zinc-400 text-[11px]", children: ["Overlay \u00B7 V", selOverlay.track] }), _jsx("button", { onClick: deleteSelected, className: "p-1 rounded hover:bg-rose-950 text-rose-400", "aria-label": "Delete", children: _jsx(Trash2, { className: "w-3.5 h-3.5" }) })] }), _jsx("p", { className: "text-zinc-400 truncate", children: vaultById.get(selOverlay.assetId)?.name }), _jsxs("label", { className: "flex items-center gap-2 text-[11px]", children: [_jsx("input", { type: "checkbox", checked: autoKey, onChange: (e) => setAutoKey(e.target.checked), className: "accent-purple-500" }), "Auto-keyframe at playhead (", selOverlay.keyframes.length, " keys)"] }), _jsx(Slider, { onEnd: endLive, label: "X", value: kNow.x, min: -0.2, max: 1.2, step: 0.005, onChange: (v) => editOverlayProp(selOverlay, { x: v }) }), _jsx(Slider, { onEnd: endLive, label: "Y", value: kNow.y, min: -0.2, max: 1.2, step: 0.005, onChange: (v) => editOverlayProp(selOverlay, { y: v }) }), _jsx(Slider, { onEnd: endLive, label: "Scale", value: kNow.scale, min: 0.1, max: 4, step: 0.01, onChange: (v) => editOverlayProp(selOverlay, { scale: v }), fmtv: (v) => `${Math.round(v * 100)}%` }), _jsx(Slider, { onEnd: endLive, label: "Rotation", value: kNow.rotation, min: -180, max: 180, step: 1, onChange: (v) => editOverlayProp(selOverlay, { rotation: v }), fmtv: (v) => `${Math.round(v)}°` }), _jsx(Slider, { onEnd: endLive, label: "Opacity", value: kNow.opacity, min: 0, max: 1, step: 0.01, onChange: (v) => editOverlayProp(selOverlay, { opacity: v }), fmtv: (v) => `${Math.round(v * 100)}%` }), _jsxs("div", { className: "flex gap-1", children: [_jsx("button", { onClick: () => {
-                                                const local = T - selOverlay.start;
-                                                const keys = selOverlay.keyframes.filter((k) => Math.abs(k.t - local) >= 0.04);
-                                                if (keys.length && keys.length < selOverlay.keyframes.length)
-                                                    patchOverlay(selOverlay.id, { keyframes: keys });
-                                            }, className: "flex-1 py-1 rounded bg-zinc-800 text-[10px] font-semibold", children: "Delete key at playhead" }), _jsx("button", { onClick: () => patchOverlay(selOverlay.id, { keyframes: [{ ...kNow, t: 0 }] }), className: "flex-1 py-1 rounded bg-zinc-800 text-[10px] font-semibold", children: "Clear animation" })] }), selOverlay.keyframes.length > 1 && (() => {
-                                    const local = T - selOverlay.start;
-                                    const sorted = [...selOverlay.keyframes].sort((a, b) => a.t - b.t);
-                                    const idx = Math.max(0, sorted.findIndex((k, i) => local >= k.t && (i === sorted.length - 1 || local < sorted[i + 1].t)));
-                                    const cur = sorted[idx];
-                                    return (_jsxs("div", { className: "space-y-1", children: [_jsxs("span", { className: "text-[10px] font-bold uppercase text-zinc-500", children: ["Easing (key ", idx + 1, " \u2192 next)"] }), _jsx("div", { className: "grid grid-cols-4 gap-1", children: ['linear', 'easeOut', 'easeInOut', 'bounce'].map((e) => (_jsx("button", { onClick: () => patchOverlay(selOverlay.id, { keyframes: sorted.map((k, i) => (i === idx ? { ...k, ease: e } : k)) }), className: `py-1 rounded text-[9px] font-semibold ${(cur.ease || 'linear') === e ? 'bg-[#5b3bb5]' : 'bg-zinc-800'}`, children: e === 'easeOut' ? 'Ease out' : e === 'easeInOut' ? 'Ease in-out' : e === 'bounce' ? 'Bounce' : 'Linear' }, e))) })] }));
-                                })(), _jsxs("div", { className: "space-y-1", children: [_jsx("span", { className: "text-[10px] font-bold uppercase text-zinc-500", children: "Animation presets" }), _jsx("div", { className: "grid grid-cols-3 gap-1", children: [['popIn', 'Pop in'], ['spinIn', 'Spin in'], ['slideUp', 'Slide up'], ['wiggle', 'Wiggle'], ['popOut', 'Pop out']].map(([k, label]) => (_jsx("button", { onClick: () => animPreset(selOverlay, k), className: "py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] font-semibold", children: label }, k))) })] }), _jsxs("div", { className: "space-y-1", children: [_jsx("span", { className: "text-[10px] font-bold uppercase text-zinc-500", children: "Blend" }), _jsx("div", { className: "grid grid-cols-4 gap-1", children: ['normal', 'screen', 'multiply', 'overlay'].map((b) => (_jsx("button", { onClick: () => patchOverlay(selOverlay.id, { blend: b }), className: `py-1 rounded text-[10px] font-semibold capitalize ${selOverlay.blend === b ? 'bg-[#5b3bb5]' : 'bg-zinc-800'}`, children: b }, b))) }), _jsx("button", { onClick: () => patchOverlay(selOverlay.id, {
-                                                fullFrame: true,
-                                                blend: 'screen',
-                                                keyframes: selOverlay.keyframes.map((k) => ({ ...k, x: 0.5, y: 0.5, scale: 1, rotation: 0, opacity: 0.35 })),
-                                            }), className: "w-full py-1 rounded bg-zinc-800 text-[10px] font-semibold", children: "\uD83D\uDC7B Ghost flashback (35% full-screen)" }), _jsxs("label", { className: "flex items-center gap-2 text-[11px]", children: [_jsx("input", { type: "checkbox", checked: !!selOverlay.fullFrame, onChange: (e) => patchOverlay(selOverlay.id, { fullFrame: e.target.checked }), className: "accent-purple-500" }), " Fill canvas"] })] }), _jsxs("div", { className: "space-y-1.5 border-t border-zinc-800 pt-2", children: [_jsxs("label", { className: "flex items-center gap-2 text-[11px] font-semibold", children: [_jsx("input", { type: "checkbox", checked: !!selOverlay.chroma?.enabled, onChange: (e) => patchOverlay(selOverlay.id, {
-                                                        chroma: { color: '#00FF00', similarity: 0.4, smoothness: 0.2, spill: 0.6, ...(selOverlay.chroma || {}), enabled: e.target.checked },
-                                                    }), className: "accent-purple-500" }), "Chroma key"] }), selOverlay.chroma?.enabled && (_jsxs(_Fragment, { children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("input", { type: "color", value: selOverlay.chroma.color.toLowerCase(), onChange: (e) => patchOverlay(selOverlay.id, { chroma: { ...selOverlay.chroma, color: e.target.value.toUpperCase() } }), className: "w-8 h-6 bg-transparent" }), _jsx("button", { onClick: () => setTool('pick'), className: "px-2 py-1 rounded bg-zinc-800 text-[10px]", children: "Pick from video" }), _jsx("button", { onClick: () => patchOverlay(selOverlay.id, { chroma: { ...selOverlay.chroma, color: '#0000FF' } }), className: "px-2 py-1 rounded bg-zinc-800 text-[10px]", children: "Blue" })] }), ['similarity', 'smoothness', 'spill'].map((f) => (_jsx(Slider, { onEnd: endLive, label: f === 'spill' ? 'Spill suppression' : f === 'smoothness' ? 'Edge feather' : 'Tolerance', value: selOverlay.chroma[f], min: 0, max: 1, step: 0.01, onChange: (v) => live({ ...tl, overlays: tl.overlays.map((o) => (o.id === selOverlay.id ? { ...o, chroma: { ...o.chroma, [f]: v } } : o)) }) }, f)))] }))] }), _jsx("p", { className: "text-[10px] text-zinc-500", children: "Drag on the canvas to move \u00B7 Track (T) pins it to a moving target" })] })) : selAudio ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsxs("p", { className: "font-bold uppercase text-zinc-400 text-[11px]", children: ["Audio \u00B7 A", selAudio.track] }), _jsx("button", { onClick: deleteSelected, className: "p-1 rounded hover:bg-rose-950 text-rose-400", "aria-label": "Delete", children: _jsx(Trash2, { className: "w-3.5 h-3.5" }) })] }), _jsx("p", { className: "text-zinc-400", children: vaultById.get(selAudio.assetId)?.name }), _jsx("p", { className: "text-[10px] text-zinc-500", children: "Normalised to \u22123 dB peak; gain is applied on top." }), _jsx(Slider, { onEnd: endLive, label: "Gain", value: selAudio.gainDb, min: -24, max: 6, step: 0.5, onChange: (v) => live({ ...tl, audio: tl.audio.map((a) => (a.id === selAudio.id ? { ...a, gainDb: v } : a)) }), fmtv: (v) => `${v > 0 ? '+' : ''}${v} dB` })] })) : selBase ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsxs("p", { className: "font-bold uppercase text-zinc-400 text-[11px]", children: ["V1 \u00B7 ", selBase.kind === 'freeze' ? 'Freeze frame' : selBase.kind === 'asset' ? 'Cutaway' : 'Gameplay'] }), _jsx("button", { onClick: deleteSelected, disabled: tl.base.length <= 1, className: "p-1 rounded hover:bg-rose-950 text-rose-400 disabled:opacity-30", "aria-label": "Delete", children: _jsx(Trash2, { className: "w-3.5 h-3.5" }) })] }), _jsxs("p", { className: "text-zinc-400", children: [segDur(selBase).toFixed(2), " s on the timeline"] }), tl.base.findIndex((s) => s.id === selBase.id) > 0 && (_jsxs("div", { className: "space-y-1", children: [_jsx("span", { className: "text-[10px] font-bold uppercase text-zinc-500", children: "Transition into this clip" }), _jsx("div", { className: "grid grid-cols-5 gap-1", children: ['none', 'flash', 'zoom', 'whip', 'glitch'].map((t) => (_jsx("button", { onClick: () => commit({ ...tl, base: tl.base.map((s) => (s.id === selBase.id ? { ...s, transitionIn: t } : s)) }), className: `py-1 rounded text-[10px] capitalize ${(selBase.transitionIn || 'none') === t ? 'bg-[#5b3bb5]' : 'bg-zinc-800'}`, children: t }, t))) })] })), selBase.kind !== 'freeze' && (_jsxs(_Fragment, { children: [_jsx(Slider, { onEnd: endLive, label: "Speed", value: selBase.speed, min: 0.25, max: 4, step: 0.05, onChange: (v) => live({ ...tl, base: tl.base.map((s) => (s.id === selBase.id ? { ...s, speed: v } : s)) }), fmtv: (v) => `${v.toFixed(2)}x` }), _jsxs("label", { className: "flex items-center gap-2 text-[11px]", children: [_jsx("input", { type: "checkbox", checked: selBase.preservePitch, onChange: (e) => commit({ ...tl, base: tl.base.map((s) => (s.id === selBase.id ? { ...s, preservePitch: e.target.checked } : s)) }), className: "accent-purple-500" }), " Preserve pitch"] }), _jsxs("label", { className: "flex items-center gap-2 text-[11px]", children: [_jsx("input", { type: "checkbox", checked: !!selBase.muted, onChange: (e) => commit({ ...tl, base: tl.base.map((s) => (s.id === selBase.id ? { ...s, muted: e.target.checked } : s)) }), className: "accent-purple-500" }), " Mute segment"] })] })), selBase.kind === 'freeze' && (_jsx(Slider, { onEnd: endLive, label: "Hold", value: selBase.freezeDur || 1, min: 0.1, max: 10, step: 0.05, onChange: (v) => live({ ...tl, base: tl.base.map((s) => (s.id === selBase.id ? { ...s, freezeDur: v } : s)) }), fmtv: (v) => `${v.toFixed(2)} s` }))] })) : selCap ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsx("p", { className: "font-bold uppercase text-zinc-400 text-[11px]", children: "Caption" }), _jsx("button", { onClick: deleteSelected, className: "p-1 rounded hover:bg-rose-950 text-rose-400", "aria-label": "Delete", children: _jsx(Trash2, { className: "w-3.5 h-3.5" }) })] }), _jsx("textarea", { rows: 2, value: selCap.text, onChange: (e) => live({ ...tl, captions: tl.captions.map((c) => (c.id === selCap.id ? { ...c, text: e.target.value } : c)) }), onBlur: endLive, className: "w-full rounded-lg bg-zinc-800 px-2 py-1.5 outline-none select-text" }), _jsx("div", { className: "grid grid-cols-4 gap-1", children: ['impact', 'pill', 'meme', 'neon', 'outline', 'sticker', 'score'].map((s) => (_jsx("button", { onClick: () => commit({ ...tl, captions: tl.captions.map((c) => (c.id === selCap.id ? { ...c, style: s } : c)) }), className: `py-1 rounded text-[10px] capitalize ${selCap.style === s ? 'bg-[#5b3bb5]' : 'bg-zinc-800'}`, children: s }, s))) }), _jsx(Slider, { onEnd: endLive, label: "Size", value: selCap.size, min: 0.03, max: 0.25, step: 0.005, onChange: (v) => live({ ...tl, captions: tl.captions.map((c) => (c.id === selCap.id ? { ...c, size: v } : c)) }) }), _jsx(Slider, { onEnd: endLive, label: "Y position", value: selCap.yFrac, min: 0.03, max: 0.97, step: 0.005, onChange: (v) => live({ ...tl, captions: tl.captions.map((c) => (c.id === selCap.id ? { ...c, yFrac: v } : c)) }) }), _jsx("div", { className: "grid grid-cols-4 gap-1", children: ['pop', 'shake', 'slide', 'none'].map((a) => (_jsx("button", { onClick: () => commit({ ...tl, captions: tl.captions.map((c) => (c.id === selCap.id ? { ...c, anim: a } : c)) }), className: `py-1 rounded text-[10px] capitalize ${selCap.anim === a ? 'bg-[#5b3bb5]' : 'bg-zinc-800'}`, children: a }, a))) })] })) : (_jsxs(_Fragment, { children: [_jsx("p", { className: "font-bold uppercase text-zinc-400 text-[11px]", children: "Canvas \u00B7 9:16" }), _jsx("div", { className: "grid grid-cols-2 gap-1", children: ['pillarbox', 'fill'].map((m) => (_jsx("button", { onClick: () => commit({ ...tl, canvas: { ...tl.canvas, mode: m } }), className: `py-1.5 rounded text-[11px] font-semibold ${tl.canvas.mode === m ? 'bg-[#5b3bb5]' : 'bg-zinc-800'}`, children: m === 'pillarbox' ? 'Blurred pillarbox' : 'Fill (crop)' }, m))) }), tl.canvas.mode === 'pillarbox' ? (_jsxs(_Fragment, { children: [_jsx(Slider, { onEnd: endLive, label: "Background blur", value: tl.canvas.blur, min: 25, max: 50, step: 1, onChange: (v) => live({ ...tl, canvas: { ...tl.canvas, blur: v } }), fmtv: (v) => `${v}px` }), _jsx(Slider, { onEnd: endLive, label: "Background brightness", value: tl.canvas.dim, min: 0.3, max: 1, step: 0.01, onChange: (v) => live({ ...tl, canvas: { ...tl.canvas, dim: v } }), fmtv: (v) => `${Math.round(v * 100)}%` }), _jsx(Slider, { onEnd: endLive, label: "Foreground size", value: tl.canvas.fgScale, min: 0.6, max: 2, step: 0.01, onChange: (v) => live({ ...tl, canvas: { ...tl.canvas, fgScale: v } }), fmtv: (v) => `${Math.round(v * 100)}%` }), _jsx(Slider, { onEnd: endLive, label: "Foreground position", value: tl.canvas.fgY, min: 0.2, max: 0.8, step: 0.005, onChange: (v) => live({ ...tl, canvas: { ...tl.canvas, fgY: v } }) })] })) : (_jsx(Slider, { onEnd: endLive, label: "Crop position", value: tl.canvas.fillX, min: 0, max: 1, step: 0.005, onChange: (v) => live({ ...tl, canvas: { ...tl.canvas, fillX: v } }) })), _jsx("p", { className: "font-bold uppercase text-zinc-400 text-[11px] pt-2 border-t border-zinc-800", children: "Audio" }), _jsx(Slider, { onEnd: endLive, label: "Gameplay volume", value: tl.baseAudio.gainDb, min: -24, max: 6, step: 0.5, onChange: (v) => live({ ...tl, baseAudio: { ...tl.baseAudio, gainDb: v } }), fmtv: (v) => `${v} dB` }), _jsxs("label", { className: "flex items-center gap-2 text-[11px]", children: [_jsx("input", { type: "checkbox", checked: tl.baseAudio.duck, onChange: (e) => commit({ ...tl, baseAudio: { ...tl.baseAudio, duck: e.target.checked } }), className: "accent-purple-500" }), " Auto-duck gameplay under SFX"] }), tl.baseAudio.duck && _jsx(Slider, { onEnd: endLive, label: "Duck amount", value: tl.baseAudio.duckDb, min: -30, max: -3, step: 1, onChange: (v) => live({ ...tl, baseAudio: { ...tl.baseAudio, duckDb: v } }), fmtv: (v) => `${v} dB` }), tl.camera.length > 0 && (_jsx("button", { onClick: () => commit({ ...tl, camera: [] }), className: "w-full py-1 rounded bg-zinc-800 text-[10px] font-semibold", children: "Remove all punch zooms" })), _jsx("p", { className: "text-[10px] text-zinc-500 pt-2", children: "Select a clip on the timeline or an overlay on the canvas to edit it." })] })) })] }), _jsxs("section", { style: { height: tlHeight }, className: "relative shrink-0 bg-zinc-900 border-t border-zinc-800 flex flex-col min-h-0", children: [_jsx("div", { onPointerDown: startTlResize, onDoubleClick: () => setTlHeight(clampTlHeight(TL_DEFAULT)), role: "separator", "aria-orientation": "horizontal", "aria-label": "Resize timeline", title: "Drag to resize the timeline \u00B7 double-click to reset", className: `absolute -top-1.5 left-0 right-0 h-3 z-40 cursor-row-resize group flex items-center justify-center ${resizingTl ? 'bg-purple-500/20' : ''}`, children: _jsx("div", { className: `h-1 w-12 rounded-full transition-colors ${resizingTl ? 'bg-purple-400' : 'bg-zinc-600 group-hover:bg-purple-400'}` }) }), _jsxs("div", { className: "flex items-center gap-3 px-3 py-1.5", children: [_jsx("button", { onClick: togglePlay, className: "p-1.5 rounded-full bg-white text-black", "aria-label": playing ? 'Pause' : 'Play', children: playing ? _jsx(Pause, { className: "w-4 h-4" }) : _jsx(Play, { className: "w-4 h-4" }) }), _jsxs("span", { className: "text-xs font-mono text-zinc-400 tabular-nums", children: [fmt(T), " / ", fmt(total)] }), _jsxs("div", { className: "ml-auto flex items-center gap-2 text-[10px] text-zinc-500", children: ["Zoom", _jsx("input", { type: "range", min: 15, max: 160, value: pxPerSec, onChange: (e) => setPxPerSec(Number(e.target.value)), className: "w-28 accent-purple-500" })] })] }), _jsx("div", { ref: tlScroll, className: "flex-1 overflow-auto relative", children: _jsxs("div", { style: { width: width + 72 }, className: "relative", children: [_jsx("div", { className: "sticky top-0 z-20 h-5 bg-zinc-900 border-b border-zinc-800 cursor-pointer", style: { marginLeft: 72 }, onPointerDown: (e) => {
+                                                }, className: "w-full text-left text-[11px] px-2 py-1.5 rounded-md bg-zinc-800/70 hover:bg-zinc-700", children: text }, text)))] }, title))) }))] }), _jsxs("main", { className: "relative flex-1 min-w-0 flex items-center justify-center p-3 pb-12 md:pb-3 bg-black/40", children: [_jsxs("div", { className: "md:hidden absolute bottom-2 left-1/2 -translate-x-1/2 z-20 flex gap-1 p-1 rounded-xl bg-zinc-900/90 border border-zinc-800 shadow-lg", children: [_jsxs("button", { onClick: () => setAddSheet({ mode: 'insert' }), className: "flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold bg-gradient-to-r from-[#5b3bb5] to-fuchsia-600", children: [_jsx(Plus, { className: "w-3.5 h-3.5" }), " Media"] }), _jsx("button", { onClick: () => { setDrawer('vault'); setPhonePanel('drawer'); }, className: "px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-zinc-800", children: "Vault" }), _jsx("button", { onClick: () => { setDrawer('captions'); setPhonePanel('drawer'); }, className: "px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-zinc-800", children: "Captions" }), _jsx("button", { onClick: () => setPhonePanel('inspect'), className: "px-2.5 py-1.5 rounded-lg text-[11px] font-semibold bg-zinc-800", children: sel ? 'Edit clip' : 'Settings' })] }), _jsxs("div", { ref: previewRef, ...dropProps('canvas'), className: `relative h-full max-h-full aspect-[9/16] rounded-lg overflow-hidden shadow-2xl bg-black ${dropTarget === 'canvas' ? 'ring-4 ring-purple-500' : ''}`, children: [dropTarget === 'canvas' && (_jsxs("div", { className: "absolute inset-0 z-20 bg-purple-950/60 flex items-center justify-center text-sm font-semibold text-center px-6 pointer-events-none", children: ["Drop to add here at ", fmt(T)] })), _jsx("canvas", { ref: canvasRef, width: PW, height: PH, onClick: onCanvasClick, onPointerDown: onCanvasPointerDown, className: `absolute inset-0 w-full h-full ${tool === 'select' ? 'cursor-default' : 'cursor-crosshair'}` }), tl.captions
+                                        .filter((c) => T >= c.startSec && T < c.endSec)
+                                        .map((c) => (_jsx("div", { className: "absolute pointer-events-none", style: { left: `${(c.xFrac ?? 0.5) * 100}%`, top: `${c.yFrac * 100}%`, transform: 'translate(-50%,-50%)' }, children: _jsx(CaptionVisual, { cue: c, frameW: previewW }) }, `${c.id}-${c.startSec}`))), sourceStatus === 'downloading' && (_jsxs("div", { className: "absolute inset-0 z-10 bg-black/70 flex flex-col items-center justify-center text-center text-xs gap-2 px-6", children: [_jsx(Loader2, { className: "w-5 h-5 animate-spin" }), _jsx("p", { className: "font-semibold", children: "Downloading the HD video for this clip\u2026" }), _jsx("p", { className: "text-zinc-400", children: "First time only (about a minute). You can already edit the timeline, captions and vault." })] })), sourceStatus === 'failed' && (_jsxs("div", { className: "absolute inset-0 z-10 bg-black/80 flex flex-col items-center justify-center text-center text-xs gap-3 px-6", children: [_jsx("p", { className: "font-semibold text-rose-300", children: meta?.source?.error || 'Couldn’t download the HD video.' }), _jsx("button", { onClick: retrySource, className: "px-3 py-1.5 rounded-lg bg-[#5b3bb5] font-semibold", children: "Retry download" })] })), busy && (_jsxs("div", { className: "absolute inset-0 bg-black/60 flex items-center justify-center text-xs gap-2", children: [_jsx(Loader2, { className: "w-4 h-4 animate-spin" }), " ", busy] }))] })] }), _jsxs("aside", { className: `${phonePanel === 'inspect' ? 'fixed inset-x-0 bottom-0 z-[56] h-[60dvh] rounded-t-2xl bg-zinc-900 block' : 'hidden'} md:block md:static md:h-auto md:rounded-none md:w-72 md:bg-zinc-900/50 shrink-0 min-h-0 border-l border-zinc-800 overflow-y-auto p-3 space-y-3 text-xs`, children: [_jsx("div", { className: "md:hidden flex justify-end -mb-1", children: _jsx("button", { onClick: () => setPhonePanel(null), className: "text-xs font-semibold text-zinc-400", children: "Close" }) }), selOverlay && kNow ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsxs("p", { className: "font-bold uppercase tracking-wider text-zinc-400 text-[11px]", children: ["Overlay ", selOverlay.track - 1] }), _jsx("button", { onClick: deleteSelected, className: "p-1 rounded hover:bg-rose-950 text-rose-400", "aria-label": "Delete", children: _jsx(Trash2, { className: "w-3.5 h-3.5" }) })] }), _jsx("p", { className: "text-zinc-400 truncate", children: vaultById.get(selOverlay.assetId)?.name }), _jsxs("label", { className: "flex items-center gap-2 text-[11px]", children: [_jsx("input", { type: "checkbox", checked: autoKey, onChange: (e) => setAutoKey(e.target.checked), className: "accent-purple-500" }), "Auto-keyframe at playhead (", selOverlay.keyframes.length, " keys)"] }), _jsx(Slider, { onEnd: endLive, label: "X", value: kNow.x, min: -0.2, max: 1.2, step: 0.005, onChange: (v) => editOverlayProp(selOverlay, { x: v }) }), _jsx(Slider, { onEnd: endLive, label: "Y", value: kNow.y, min: -0.2, max: 1.2, step: 0.005, onChange: (v) => editOverlayProp(selOverlay, { y: v }) }), _jsx(Slider, { onEnd: endLive, label: "Scale", value: kNow.scale, min: 0.1, max: 4, step: 0.01, onChange: (v) => editOverlayProp(selOverlay, { scale: v }), fmtv: (v) => `${Math.round(v * 100)}%` }), _jsx(Slider, { onEnd: endLive, label: "Rotation", value: kNow.rotation, min: -180, max: 180, step: 1, onChange: (v) => editOverlayProp(selOverlay, { rotation: v }), fmtv: (v) => `${Math.round(v)}°` }), _jsx(Slider, { onEnd: endLive, label: "Opacity", value: kNow.opacity, min: 0, max: 1, step: 0.01, onChange: (v) => editOverlayProp(selOverlay, { opacity: v }), fmtv: (v) => `${Math.round(v * 100)}%` }), _jsxs("div", { className: "flex gap-1", children: [_jsx("button", { onClick: () => {
+                                                    const local = T - selOverlay.start;
+                                                    const keys = selOverlay.keyframes.filter((k) => Math.abs(k.t - local) >= 0.04);
+                                                    if (keys.length && keys.length < selOverlay.keyframes.length)
+                                                        patchOverlay(selOverlay.id, { keyframes: keys });
+                                                }, className: "flex-1 py-1 rounded bg-zinc-800 text-[10px] font-semibold", children: "Delete key at playhead" }), _jsx("button", { onClick: () => patchOverlay(selOverlay.id, { keyframes: [{ ...kNow, t: 0 }] }), className: "flex-1 py-1 rounded bg-zinc-800 text-[10px] font-semibold", children: "Clear animation" })] }), selOverlay.keyframes.length > 1 && (() => {
+                                        const local = T - selOverlay.start;
+                                        const sorted = [...selOverlay.keyframes].sort((a, b) => a.t - b.t);
+                                        const idx = Math.max(0, sorted.findIndex((k, i) => local >= k.t && (i === sorted.length - 1 || local < sorted[i + 1].t)));
+                                        const cur = sorted[idx];
+                                        return (_jsxs("div", { className: "space-y-1", children: [_jsxs("span", { className: "text-[10px] font-bold uppercase text-zinc-500", children: ["Easing (key ", idx + 1, " \u2192 next)"] }), _jsx("div", { className: "grid grid-cols-4 gap-1", children: ['linear', 'easeOut', 'easeInOut', 'bounce'].map((e) => (_jsx("button", { onClick: () => patchOverlay(selOverlay.id, { keyframes: sorted.map((k, i) => (i === idx ? { ...k, ease: e } : k)) }), className: `py-1 rounded text-[9px] font-semibold ${(cur.ease || 'linear') === e ? 'bg-[#5b3bb5]' : 'bg-zinc-800'}`, children: e === 'easeOut' ? 'Ease out' : e === 'easeInOut' ? 'Ease in-out' : e === 'bounce' ? 'Bounce' : 'Linear' }, e))) })] }));
+                                    })(), _jsxs("div", { className: "space-y-1", children: [_jsx("span", { className: "text-[10px] font-bold uppercase text-zinc-500", children: "Animation presets" }), _jsx("div", { className: "grid grid-cols-3 gap-1", children: [['popIn', 'Pop in'], ['spinIn', 'Spin in'], ['slideUp', 'Slide up'], ['wiggle', 'Wiggle'], ['popOut', 'Pop out']].map(([k, label]) => (_jsx("button", { onClick: () => animPreset(selOverlay, k), className: "py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-[10px] font-semibold", children: label }, k))) })] }), _jsxs("div", { className: "space-y-1", children: [_jsx("span", { className: "text-[10px] font-bold uppercase text-zinc-500", children: "Blend" }), _jsx("div", { className: "grid grid-cols-4 gap-1", children: ['normal', 'screen', 'multiply', 'overlay'].map((b) => (_jsx("button", { onClick: () => patchOverlay(selOverlay.id, { blend: b }), className: `py-1 rounded text-[10px] font-semibold capitalize ${selOverlay.blend === b ? 'bg-[#5b3bb5]' : 'bg-zinc-800'}`, children: b }, b))) }), _jsx("button", { onClick: () => patchOverlay(selOverlay.id, {
+                                                    fullFrame: true,
+                                                    blend: 'screen',
+                                                    keyframes: selOverlay.keyframes.map((k) => ({ ...k, x: 0.5, y: 0.5, scale: 1, rotation: 0, opacity: 0.35 })),
+                                                }), className: "w-full py-1 rounded bg-zinc-800 text-[10px] font-semibold", children: "\uD83D\uDC7B Ghost flashback (35% full-screen)" }), _jsxs("label", { className: "flex items-center gap-2 text-[11px]", children: [_jsx("input", { type: "checkbox", checked: !!selOverlay.fullFrame, onChange: (e) => patchOverlay(selOverlay.id, { fullFrame: e.target.checked }), className: "accent-purple-500" }), " Fill canvas"] })] }), _jsxs("div", { className: "space-y-1.5 border-t border-zinc-800 pt-2", children: [_jsxs("label", { className: "flex items-center gap-2 text-[11px] font-semibold", children: [_jsx("input", { type: "checkbox", checked: !!selOverlay.chroma?.enabled, onChange: (e) => patchOverlay(selOverlay.id, {
+                                                            chroma: { color: '#00FF00', similarity: 0.4, smoothness: 0.2, spill: 0.6, ...(selOverlay.chroma || {}), enabled: e.target.checked },
+                                                        }), className: "accent-purple-500" }), "Chroma key"] }), selOverlay.chroma?.enabled && (_jsxs(_Fragment, { children: [_jsxs("div", { className: "flex items-center gap-2", children: [_jsx("input", { type: "color", value: selOverlay.chroma.color.toLowerCase(), onChange: (e) => patchOverlay(selOverlay.id, { chroma: { ...selOverlay.chroma, color: e.target.value.toUpperCase() } }), className: "w-8 h-6 bg-transparent" }), _jsx("button", { onClick: () => setTool('pick'), className: "px-2 py-1 rounded bg-zinc-800 text-[10px]", children: "Pick from video" }), _jsx("button", { onClick: () => patchOverlay(selOverlay.id, { chroma: { ...selOverlay.chroma, color: '#0000FF' } }), className: "px-2 py-1 rounded bg-zinc-800 text-[10px]", children: "Blue" })] }), ['similarity', 'smoothness', 'spill'].map((f) => (_jsx(Slider, { onEnd: endLive, label: f === 'spill' ? 'Spill suppression' : f === 'smoothness' ? 'Edge feather' : 'Tolerance', value: selOverlay.chroma[f], min: 0, max: 1, step: 0.01, onChange: (v) => live({ ...tl, overlays: tl.overlays.map((o) => (o.id === selOverlay.id ? { ...o, chroma: { ...o.chroma, [f]: v } } : o)) }) }, f)))] }))] }), _jsx("p", { className: "text-[10px] text-zinc-500", children: "Drag on the canvas to move \u00B7 Track (T) pins it to a moving target" })] })) : selAudio ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsxs("p", { className: "font-bold uppercase text-zinc-400 text-[11px]", children: ["Sound ", selAudio.track - 1] }), _jsx("button", { onClick: deleteSelected, className: "p-1 rounded hover:bg-rose-950 text-rose-400", "aria-label": "Delete", children: _jsx(Trash2, { className: "w-3.5 h-3.5" }) })] }), _jsx("p", { className: "text-zinc-400", children: vaultById.get(selAudio.assetId)?.name }), _jsx("p", { className: "text-[10px] text-zinc-500", children: "Normalised to \u22123 dB peak; gain is applied on top." }), _jsx(Slider, { onEnd: endLive, label: "Gain", value: selAudio.gainDb, min: -24, max: 6, step: 0.5, onChange: (v) => live({ ...tl, audio: tl.audio.map((a) => (a.id === selAudio.id ? { ...a, gainDb: v } : a)) }), fmtv: (v) => `${v > 0 ? '+' : ''}${v} dB` })] })) : selBase ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsxs("p", { className: "font-bold uppercase text-zinc-400 text-[11px]", children: ["Main video \u00B7 ", selBase.kind === 'freeze' ? 'Freeze frame' : selBase.kind === 'asset' ? 'Inserted clip' : 'Gameplay'] }), _jsx("button", { onClick: deleteSelected, disabled: tl.base.length <= 1, className: "p-1 rounded hover:bg-rose-950 text-rose-400 disabled:opacity-30", "aria-label": "Delete", children: _jsx(Trash2, { className: "w-3.5 h-3.5" }) })] }), _jsxs("p", { className: "text-zinc-400", children: [segDur(selBase).toFixed(2), " s on the timeline"] }), tl.base.findIndex((s) => s.id === selBase.id) > 0 && (_jsxs("div", { className: "space-y-1", children: [_jsx("span", { className: "text-[10px] font-bold uppercase text-zinc-500", children: "Transition into this clip" }), _jsx("div", { className: "grid grid-cols-5 gap-1", children: ['none', 'flash', 'zoom', 'whip', 'glitch'].map((t) => (_jsx("button", { onClick: () => commit({ ...tl, base: tl.base.map((s) => (s.id === selBase.id ? { ...s, transitionIn: t } : s)) }), className: `py-1 rounded text-[10px] capitalize ${(selBase.transitionIn || 'none') === t ? 'bg-[#5b3bb5]' : 'bg-zinc-800'}`, children: t }, t))) })] })), selBase.kind !== 'freeze' && (_jsxs(_Fragment, { children: [_jsx(Slider, { onEnd: endLive, label: "Speed", value: selBase.speed, min: 0.25, max: 4, step: 0.05, onChange: (v) => live({ ...tl, base: tl.base.map((s) => (s.id === selBase.id ? { ...s, speed: v } : s)) }), fmtv: (v) => `${v.toFixed(2)}x` }), _jsxs("label", { className: "flex items-center gap-2 text-[11px]", children: [_jsx("input", { type: "checkbox", checked: selBase.preservePitch, onChange: (e) => commit({ ...tl, base: tl.base.map((s) => (s.id === selBase.id ? { ...s, preservePitch: e.target.checked } : s)) }), className: "accent-purple-500" }), " Preserve pitch"] }), _jsxs("label", { className: "flex items-center gap-2 text-[11px]", children: [_jsx("input", { type: "checkbox", checked: !!selBase.muted, onChange: (e) => commit({ ...tl, base: tl.base.map((s) => (s.id === selBase.id ? { ...s, muted: e.target.checked } : s)) }), className: "accent-purple-500" }), " Mute segment"] })] })), selBase.kind === 'freeze' && (_jsx(Slider, { onEnd: endLive, label: "Hold", value: selBase.freezeDur || 1, min: 0.1, max: 10, step: 0.05, onChange: (v) => live({ ...tl, base: tl.base.map((s) => (s.id === selBase.id ? { ...s, freezeDur: v } : s)) }), fmtv: (v) => `${v.toFixed(2)} s` }))] })) : selCap ? (_jsxs(_Fragment, { children: [_jsxs("div", { className: "flex items-center justify-between", children: [_jsx("p", { className: "font-bold uppercase text-zinc-400 text-[11px]", children: "Caption" }), _jsx("button", { onClick: deleteSelected, className: "p-1 rounded hover:bg-rose-950 text-rose-400", "aria-label": "Delete", children: _jsx(Trash2, { className: "w-3.5 h-3.5" }) })] }), _jsx("textarea", { rows: 2, value: selCap.text, onChange: (e) => live({ ...tl, captions: tl.captions.map((c) => (c.id === selCap.id ? { ...c, text: e.target.value } : c)) }), onBlur: endLive, className: "w-full rounded-lg bg-zinc-800 px-2 py-1.5 outline-none select-text" }), _jsx("div", { className: "grid grid-cols-4 gap-1", children: ['impact', 'pill', 'meme', 'neon', 'outline', 'sticker', 'score'].map((s) => (_jsx("button", { onClick: () => commit({ ...tl, captions: tl.captions.map((c) => (c.id === selCap.id ? { ...c, style: s } : c)) }), className: `py-1 rounded text-[10px] capitalize ${selCap.style === s ? 'bg-[#5b3bb5]' : 'bg-zinc-800'}`, children: s }, s))) }), _jsx(Slider, { onEnd: endLive, label: "Size", value: selCap.size, min: 0.03, max: 0.25, step: 0.005, onChange: (v) => live({ ...tl, captions: tl.captions.map((c) => (c.id === selCap.id ? { ...c, size: v } : c)) }) }), _jsx(Slider, { onEnd: endLive, label: "Y position", value: selCap.yFrac, min: 0.03, max: 0.97, step: 0.005, onChange: (v) => live({ ...tl, captions: tl.captions.map((c) => (c.id === selCap.id ? { ...c, yFrac: v } : c)) }) }), _jsx("div", { className: "grid grid-cols-4 gap-1", children: ['pop', 'shake', 'slide', 'none'].map((a) => (_jsx("button", { onClick: () => commit({ ...tl, captions: tl.captions.map((c) => (c.id === selCap.id ? { ...c, anim: a } : c)) }), className: `py-1 rounded text-[10px] capitalize ${selCap.anim === a ? 'bg-[#5b3bb5]' : 'bg-zinc-800'}`, children: a }, a))) })] })) : (_jsxs(_Fragment, { children: [_jsx("p", { className: "font-bold uppercase text-zinc-400 text-[11px]", children: "Canvas \u00B7 9:16" }), _jsx("div", { className: "grid grid-cols-2 gap-1", children: ['pillarbox', 'fill'].map((m) => (_jsx("button", { onClick: () => commit({ ...tl, canvas: { ...tl.canvas, mode: m } }), className: `py-1.5 rounded text-[11px] font-semibold ${tl.canvas.mode === m ? 'bg-[#5b3bb5]' : 'bg-zinc-800'}`, children: m === 'pillarbox' ? 'Blurred pillarbox' : 'Fill (crop)' }, m))) }), tl.canvas.mode === 'pillarbox' ? (_jsxs(_Fragment, { children: [_jsx(Slider, { onEnd: endLive, label: "Background blur", value: tl.canvas.blur, min: 25, max: 50, step: 1, onChange: (v) => live({ ...tl, canvas: { ...tl.canvas, blur: v } }), fmtv: (v) => `${v}px` }), _jsx(Slider, { onEnd: endLive, label: "Background brightness", value: tl.canvas.dim, min: 0.3, max: 1, step: 0.01, onChange: (v) => live({ ...tl, canvas: { ...tl.canvas, dim: v } }), fmtv: (v) => `${Math.round(v * 100)}%` }), _jsx(Slider, { onEnd: endLive, label: "Foreground size", value: tl.canvas.fgScale, min: 0.6, max: 2, step: 0.01, onChange: (v) => live({ ...tl, canvas: { ...tl.canvas, fgScale: v } }), fmtv: (v) => `${Math.round(v * 100)}%` }), _jsx(Slider, { onEnd: endLive, label: "Foreground position", value: tl.canvas.fgY, min: 0.2, max: 0.8, step: 0.005, onChange: (v) => live({ ...tl, canvas: { ...tl.canvas, fgY: v } }) })] })) : (_jsx(Slider, { onEnd: endLive, label: "Crop position", value: tl.canvas.fillX, min: 0, max: 1, step: 0.005, onChange: (v) => live({ ...tl, canvas: { ...tl.canvas, fillX: v } }) })), _jsx("p", { className: "font-bold uppercase text-zinc-400 text-[11px] pt-2 border-t border-zinc-800", children: "Audio" }), _jsx(Slider, { onEnd: endLive, label: "Gameplay volume", value: tl.baseAudio.gainDb, min: -24, max: 6, step: 0.5, onChange: (v) => live({ ...tl, baseAudio: { ...tl.baseAudio, gainDb: v } }), fmtv: (v) => `${v} dB` }), _jsxs("label", { className: "flex items-center gap-2 text-[11px]", children: [_jsx("input", { type: "checkbox", checked: tl.baseAudio.duck, onChange: (e) => commit({ ...tl, baseAudio: { ...tl.baseAudio, duck: e.target.checked } }), className: "accent-purple-500" }), " Auto-duck gameplay under SFX"] }), tl.baseAudio.duck && _jsx(Slider, { onEnd: endLive, label: "Duck amount", value: tl.baseAudio.duckDb, min: -30, max: -3, step: 1, onChange: (v) => live({ ...tl, baseAudio: { ...tl.baseAudio, duckDb: v } }), fmtv: (v) => `${v} dB` }), tl.camera.length > 0 && (_jsx("button", { onClick: () => commit({ ...tl, camera: [] }), className: "w-full py-1 rounded bg-zinc-800 text-[10px] font-semibold", children: "Remove all punch zooms" })), _jsx("p", { className: "text-[10px] text-zinc-500 pt-2", children: "Select a clip on the timeline or an overlay on the canvas to edit it." })] }))] })] }), _jsxs("section", { style: { height: tlHeight }, className: "relative shrink-0 bg-zinc-900 border-t border-zinc-800 flex flex-col min-h-0", children: [_jsx("div", { onPointerDown: startTlResize, onDoubleClick: () => setTlHeight(clampTlHeight(TL_DEFAULT)), role: "separator", "aria-orientation": "horizontal", "aria-label": "Resize timeline", title: "Drag to resize the timeline \u00B7 double-click to reset", className: `absolute -top-1.5 left-0 right-0 h-3 z-40 cursor-row-resize group flex items-center justify-center ${resizingTl ? 'bg-purple-500/20' : ''}`, children: _jsx("div", { className: `h-1 w-12 rounded-full transition-colors ${resizingTl ? 'bg-purple-400' : 'bg-zinc-600 group-hover:bg-purple-400'}` }) }), _jsxs("div", { className: "flex items-center gap-3 px-3 py-1.5", children: [_jsx("button", { onClick: togglePlay, className: "p-1.5 rounded-full bg-white text-black", "aria-label": playing ? 'Pause' : 'Play', children: playing ? _jsx(Pause, { className: "w-4 h-4" }) : _jsx(Play, { className: "w-4 h-4" }) }), _jsxs("span", { className: "text-xs font-mono text-zinc-400 tabular-nums", children: [fmt(T), " / ", fmt(total)] }), _jsxs("button", { onClick: () => setAddSheet({ mode: 'insert' }), className: "hidden sm:flex items-center gap-1 px-2 py-1 rounded-md bg-zinc-800 hover:bg-zinc-700 text-[11px] font-semibold", title: "Add media at the playhead (A)", children: [_jsx(Plus, { className: "w-3.5 h-3.5" }), " Add"] }), _jsxs("div", { className: "ml-auto flex items-center gap-2 text-[10px] text-zinc-500", children: [_jsxs("button", { onClick: () => setSnap((v) => !v), title: snap ? 'Snapping on: edges stick to the playhead and other clips' : 'Snapping off', className: `flex items-center gap-1 px-2 py-1 rounded-md font-semibold ${snap ? 'bg-[#5b3bb5]/30 text-purple-200' : 'bg-zinc-800 text-zinc-500'}`, children: [_jsx(Magnet, { className: "w-3.5 h-3.5" }), " Snap"] }), "Zoom", _jsx("input", { type: "range", min: 15, max: 160, value: pxPerSec, onChange: (e) => setPxPerSec(Number(e.target.value)), className: "w-28 accent-purple-500" })] })] }), _jsx("div", { ref: tlScroll, onPointerMove: (e) => tool === 'blade' && setBladeT(snapTo(timeFromX(e.clientX), snapPoints()).t), onPointerLeave: () => setBladeT(null), className: `flex-1 overflow-auto relative ${tool === 'blade' ? 'cursor-crosshair' : ''}`, children: _jsxs("div", { style: { width: width + 72 }, className: "relative", children: [_jsxs("div", { className: "sticky top-0 z-20 h-5 bg-zinc-900 border-b border-zinc-800 cursor-pointer", style: { marginLeft: 72 }, onPointerDown: (e) => {
                                         seek(timeFromX(e.clientX));
                                         const mv = (ev) => seek(timeFromX(ev.clientX));
                                         const up = () => {
@@ -1637,23 +2224,37 @@ export const NleEditorPage = ({ clipId }) => {
                                         };
                                         window.addEventListener('pointermove', mv);
                                         window.addEventListener('pointerup', up);
-                                    }, children: Array.from({ length: Math.ceil(total) + 1 }, (_, s) => (_jsxs("div", { className: "absolute top-0 h-full", style: { left: s * pxPerSec }, children: [_jsx("div", { className: `w-px ${s % 5 === 0 ? 'h-3 bg-zinc-500' : 'h-1.5 bg-zinc-700'}` }), (s % 5 === 0 || pxPerSec > 60) && _jsxs("span", { className: "absolute top-2 left-1 text-[9px] text-zinc-500", children: [s, "s"] })] }, s))) }), TRACK_ROWS.map((row) => (_jsxs("div", { className: "relative flex border-b border-zinc-800/70", style: { height: ROW_H }, children: [_jsx("div", { className: "sticky left-0 z-10 w-[72px] shrink-0 bg-zinc-900 text-[10px] font-semibold text-zinc-400 flex items-center px-2 border-r border-zinc-800", children: ROW_LABEL[row] }), _jsxs("div", { className: "relative flex-1", onPointerDown: (e) => e.target === e.currentTarget && (setSel(null), seek(timeFromX(e.clientX))), children: [row === 'v1' &&
+                                    }, children: [(markIn !== null || markOut !== null) && (_jsx("div", { className: "absolute top-0 h-full bg-amber-400/30 border-x border-amber-400 pointer-events-none", style: {
+                                                left: Math.min(markIn ?? markOut, markOut ?? markIn) * pxPerSec,
+                                                width: Math.max(2, Math.abs((markOut ?? markIn) - (markIn ?? markOut)) * pxPerSec),
+                                            } })), Array.from({ length: Math.ceil(total) + 1 }, (_, s) => (_jsxs("div", { className: "absolute top-0 h-full", style: { left: s * pxPerSec }, children: [_jsx("div", { className: `w-px ${s % 5 === 0 ? 'h-3 bg-zinc-500' : 'h-1.5 bg-zinc-700'}` }), (s % 5 === 0 || pxPerSec > 60) && _jsxs("span", { className: "absolute top-2 left-1 text-[9px] text-zinc-500", children: [s, "s"] })] }, s)))] }), TRACK_ROWS.map((row) => (_jsxs("div", { className: "relative flex border-b border-zinc-800/70", style: { height: ROW_H }, children: [_jsx("div", { className: "sticky left-0 z-10 w-[72px] shrink-0 bg-zinc-900 text-[10px] font-semibold text-zinc-400 flex items-center px-2 border-r border-zinc-800 whitespace-nowrap overflow-hidden", children: ROW_LABEL[row] }), _jsxs("div", { className: `relative flex-1 ${dropHint?.row === row ? 'bg-purple-500/10' : ''}`, ...rowDrop(row), onPointerDown: (e) => e.target === e.currentTarget && (setSel(null), seek(timeFromX(e.clientX))), children: [dropHint?.row === row && (_jsx("div", { className: "absolute top-0 bottom-0 z-20 w-0.5 bg-purple-300 pointer-events-none", style: { left: dropHint.t * pxPerSec }, children: _jsx("span", { className: "absolute -top-0.5 left-1 whitespace-nowrap rounded bg-purple-500 px-1 text-[9px] font-bold", children: row === 'v1' ? 'Insert here' : 'Put on top' }) })), row === 'v1' && !playing && tool !== 'blade' && (_jsx("button", { onPointerDown: (e) => e.stopPropagation(), onClick: () => setAddSheet({ mode: 'insert' }), title: "Insert a clip here (A)", className: "absolute top-1/2 -translate-y-1/2 -ml-2.5 z-20 w-5 h-5 rounded-full bg-white text-black shadow flex items-center justify-center hover:scale-110 transition", style: { left: Math.max(10, T * pxPerSec) }, children: _jsx(Plus, { className: "w-3.5 h-3.5" }) })), row === 'v1' &&
                                                     tl.base.map((s, i) => {
                                                         const d = segDur(s);
                                                         const label = `${s.transitionIn && s.transitionIn !== 'none' ? `⚡${s.transitionIn} · ` : ''}${s.kind === 'freeze' ? '❄ Freeze' : s.kind === 'asset' ? `🎬 ${vaultById.get(s.assetId || '')?.name || 'Cutaway'}` : `Gameplay${s.speed !== 1 ? ` · ${s.speed}x` : ''}`}`;
                                                         return (_jsxs("div", { onPointerDown: (e) => {
                                                                 e.stopPropagation();
+                                                                if (tool === 'blade')
+                                                                    return splitAt(snapTo(timeFromX(e.clientX), snapPoints()).t, { type: 'base', id: s.id });
                                                                 setSel({ type: 'base', id: s.id });
-                                                            }, className: `absolute top-0.5 bottom-0.5 rounded flex items-center px-2 text-[10px] font-semibold overflow-hidden ${s.kind === 'freeze' ? 'bg-sky-700' : s.kind === 'asset' ? 'bg-fuchsia-700' : 'bg-emerald-700'} ${sel?.type === 'base' && sel.id === s.id ? 'ring-2 ring-white' : ''}`, style: { left: segStarts[i] * pxPerSec, width: Math.max(4, d * pxPerSec - 1) }, children: [_jsx("span", { className: "truncate pointer-events-none", children: label }), _jsx("div", { onPointerDown: (e) => trimBase(e, s.id, 'l'), className: "absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-black/30" }), _jsx("div", { onPointerDown: (e) => trimBase(e, s.id, 'r'), className: "absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-black/30" })] }, s.id));
+                                                            }, className: `absolute top-0.5 bottom-0.5 rounded flex items-center px-2 text-[10px] font-semibold overflow-hidden ${s.kind === 'freeze' ? 'bg-sky-700' : s.kind === 'asset' ? 'bg-fuchsia-700' : 'bg-emerald-700'} ${sel?.type === 'base' && sel.id === s.id ? 'ring-2 ring-white' : ''}`, style: { left: segStarts[i] * pxPerSec, width: Math.max(4, d * pxPerSec - 1) }, children: [_jsx("span", { className: "truncate pointer-events-none", children: label }), _jsx(Handle, { side: "l", active: sel?.type === 'base' && sel.id === s.id, onPointerDown: (e) => trimBase(e, s.id, 'l') }), _jsx(Handle, { side: "r", active: sel?.type === 'base' && sel.id === s.id, onPointerDown: (e) => trimBase(e, s.id, 'r') })] }, s.id));
                                                     }), row === 'a1' &&
                                                     tl.base.map((s, i) => (_jsx("div", { className: `absolute top-1 bottom-1 rounded-sm ${s.kind === 'freeze' || s.muted ? 'bg-zinc-800' : 'bg-emerald-900/70'}`, style: { left: segStarts[i] * pxPerSec, width: Math.max(2, segDur(s) * pxPerSec - 1) } }, s.id))), row === 'cam' &&
                                                     tl.camera.map((k, i) => (_jsx("div", { title: `zoom ${Math.round(k.scale * 100)}%`, className: "absolute top-2 w-2.5 h-2.5 rotate-45 bg-amber-400 -ml-1", style: { left: k.t * pxPerSec } }, i))), ['v2', 'v3', 'v4'].includes(row) &&
                                                     tl.overlays
                                                         .filter((o) => `v${o.track}` === row)
                                                         .map((o) => (_jsxs("div", { onPointerDown: (e) => dragItem(e, 'overlay', o.id, 'move'), className: `absolute top-0.5 bottom-0.5 rounded bg-violet-700 px-2 text-[10px] font-semibold flex items-center overflow-hidden cursor-grab ${sel?.type === 'overlay' && sel.id === o.id ? 'ring-2 ring-white' : ''}`, style: { left: o.start * pxPerSec, width: Math.max(6, (o.end - o.start) * pxPerSec) }, children: [_jsxs("span", { className: "truncate pointer-events-none", children: [o.chroma?.enabled ? '🟩 ' : '', o.blend !== 'normal' ? `[${o.blend}] ` : '', vaultById.get(o.assetId)?.name] }), o.keyframes.length > 1 &&
-                                                                o.keyframes.map((k, ki) => (_jsx("div", { className: "absolute bottom-0.5 w-1.5 h-1.5 rotate-45 bg-amber-300 pointer-events-none", style: { left: k.t * pxPerSec - 3 } }, ki))), _jsx("div", { onPointerDown: (e) => dragItem(e, 'overlay', o.id, 'l'), className: "absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-black/30" }), _jsx("div", { onPointerDown: (e) => dragItem(e, 'overlay', o.id, 'r'), className: "absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-black/30" })] }, o.id))), ['a2', 'a3', 'a4'].includes(row) &&
+                                                                o.keyframes.map((k, ki) => (_jsx("div", { className: "absolute bottom-0.5 w-1.5 h-1.5 rotate-45 bg-amber-300 pointer-events-none", style: { left: k.t * pxPerSec - 3 } }, ki))), _jsx(Handle, { side: "l", active: sel?.type === 'overlay' && sel.id === o.id, onPointerDown: (e) => dragItem(e, 'overlay', o.id, 'l') }), _jsx(Handle, { side: "r", active: sel?.type === 'overlay' && sel.id === o.id, onPointerDown: (e) => dragItem(e, 'overlay', o.id, 'r') })] }, o.id))), ['a2', 'a3', 'a4'].includes(row) &&
                                                     tl.audio
                                                         .filter((a) => `a${a.track}` === row)
-                                                        .map((a) => (_jsxs("div", { onPointerDown: (e) => dragItem(e, 'audio', a.id, 'move'), className: `absolute top-0.5 bottom-0.5 rounded bg-orange-700 px-2 text-[10px] font-semibold flex items-center overflow-hidden cursor-grab ${sel?.type === 'audio' && sel.id === a.id ? 'ring-2 ring-white' : ''}`, style: { left: a.start * pxPerSec, width: Math.max(6, (a.end - a.start) * pxPerSec) }, children: [_jsxs("span", { className: "truncate pointer-events-none", children: ["\uD83D\uDD0A ", vaultById.get(a.assetId)?.name] }), _jsx("div", { onPointerDown: (e) => dragItem(e, 'audio', a.id, 'l'), className: "absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-black/30" }), _jsx("div", { onPointerDown: (e) => dragItem(e, 'audio', a.id, 'r'), className: "absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-black/30" })] }, a.id))), row === 'text' &&
-                                                    tl.captions.map((c) => (_jsxs("div", { onPointerDown: (e) => dragItem(e, 'caption', c.id, 'move'), className: `absolute top-0.5 bottom-0.5 rounded bg-yellow-700 px-2 text-[10px] font-semibold flex items-center overflow-hidden cursor-grab ${sel?.type === 'caption' && sel.id === c.id ? 'ring-2 ring-white' : ''}`, style: { left: c.startSec * pxPerSec, width: Math.max(6, (c.endSec - c.startSec) * pxPerSec) }, children: [_jsx("span", { className: "truncate pointer-events-none", children: c.text }), _jsx("div", { onPointerDown: (e) => dragItem(e, 'caption', c.id, 'l'), className: "absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-black/30" }), _jsx("div", { onPointerDown: (e) => dragItem(e, 'caption', c.id, 'r'), className: "absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize bg-black/30" })] }, c.id)))] })] }, row))), _jsx("div", { className: "pointer-events-none absolute top-0 bottom-0 w-px bg-rose-500 z-30", style: { left: 72 + T * pxPerSec }, children: _jsx("div", { className: "w-2.5 h-2.5 -ml-[5px] rounded-full bg-rose-500" }) })] }) })] }), toast && _jsx("div", { style: { bottom: tlHeight + 20 }, className: "fixed left-1/2 -translate-x-1/2 bg-zinc-800 border border-zinc-700 text-xs px-4 py-2 rounded-xl shadow-xl z-50", children: toast }), job?.status === 'done' && job.videoUrl && (_jsx("a", { href: `${API_BASE}${job.videoUrl}`, target: "_blank", rel: "noreferrer", className: "fixed top-14 right-4 z-50 bg-emerald-600 text-xs font-semibold px-3 py-2 rounded-lg shadow-xl", onClick: () => setJob(null), children: "\u2713 Export ready \u2014 open video" }))] }));
+                                                        .map((a) => (_jsxs("div", { onPointerDown: (e) => dragItem(e, 'audio', a.id, 'move'), className: `absolute top-0.5 bottom-0.5 rounded bg-orange-700 px-2 text-[10px] font-semibold flex items-center overflow-hidden cursor-grab ${sel?.type === 'audio' && sel.id === a.id ? 'ring-2 ring-white' : ''}`, style: { left: a.start * pxPerSec, width: Math.max(6, (a.end - a.start) * pxPerSec) }, children: [_jsxs("span", { className: "truncate pointer-events-none", children: ["\uD83D\uDD0A ", vaultById.get(a.assetId)?.name] }), _jsx(Handle, { side: "l", active: sel?.type === 'audio' && sel.id === a.id, onPointerDown: (e) => dragItem(e, 'audio', a.id, 'l') }), _jsx(Handle, { side: "r", active: sel?.type === 'audio' && sel.id === a.id, onPointerDown: (e) => dragItem(e, 'audio', a.id, 'r') })] }, a.id))), row === 'text' &&
+                                                    tl.captions.map((c) => (_jsxs("div", { onPointerDown: (e) => dragItem(e, 'caption', c.id, 'move'), className: `absolute top-0.5 bottom-0.5 rounded bg-yellow-700 px-2 text-[10px] font-semibold flex items-center overflow-hidden cursor-grab ${sel?.type === 'caption' && sel.id === c.id ? 'ring-2 ring-white' : ''}`, style: { left: c.startSec * pxPerSec, width: Math.max(6, (c.endSec - c.startSec) * pxPerSec) }, children: [_jsx("span", { className: "truncate pointer-events-none", children: c.text }), _jsx(Handle, { side: "l", active: sel?.type === 'caption' && sel.id === c.id, onPointerDown: (e) => dragItem(e, 'caption', c.id, 'l') }), _jsx(Handle, { side: "r", active: sel?.type === 'caption' && sel.id === c.id, onPointerDown: (e) => dragItem(e, 'caption', c.id, 'r') })] }, c.id)))] })] }, row))), bladeT !== null && tool === 'blade' && (_jsx("div", { className: "pointer-events-none absolute top-5 bottom-0 z-30 border-l-2 border-dashed border-amber-300", style: { left: 72 + bladeT * pxPerSec }, children: _jsx(Scissors, { className: "w-3.5 h-3.5 -ml-[8px] text-amber-300" }) })), snapLine !== null && _jsx("div", { className: "pointer-events-none absolute top-0 bottom-0 z-30 w-px bg-yellow-300", style: { left: 72 + snapLine * pxPerSec } }), cutFlash !== null && (_jsx("div", { className: "pointer-events-none absolute top-5 bottom-0 z-30 w-0.5 bg-white animate-pulse", style: { left: 72 + cutFlash * pxPerSec }, children: _jsx("span", { className: "absolute top-0 -left-2 w-4 h-4 rounded-full bg-white text-black flex items-center justify-center", children: _jsx(Scissors, { className: "w-2.5 h-2.5" }) }) })), _jsx("div", { className: "pointer-events-none absolute top-0 bottom-0 w-px bg-rose-500 z-30", style: { left: 72 + T * pxPerSec }, children: _jsx("div", { className: "w-2.5 h-2.5 -ml-[5px] rounded-full bg-rose-500" }) })] }) })] }), toast && (_jsxs("div", { style: { bottom: tlHeight + 20 }, className: "fixed left-1/2 -translate-x-1/2 max-w-[92vw] flex items-center gap-3 bg-zinc-800 border border-zinc-700 text-xs px-4 py-2 rounded-xl shadow-xl z-50", children: [_jsx("span", { children: toast }), toastUndo && past.length > 0 && (_jsx("button", { onClick: () => {
+                            undo();
+                            setToast('Undone');
+                        }, className: "font-bold text-purple-300 hover:text-white", children: "Undo" }))] })), dragInfo && (_jsx("div", { className: "fixed z-[70] pointer-events-none -translate-x-1/2 -translate-y-full px-2 py-1 rounded-md bg-black/90 text-[11px] font-semibold font-mono shadow-lg", style: { left: dragInfo.x, top: dragInfo.y - 14 }, children: dragInfo.text })), addSheet && (_jsx(AddMediaSheet, { clipId: clipId, vault: vault, source: meta.source || null, sourceTimeAtPlayhead: (() => {
+                    const loc = locate(tl, T);
+                    return loc.seg.kind === 'source' ? mediaTime(loc.seg, loc.local) : (meta.source?.offset || 0);
+                })(), canReplace: sel?.type === 'base' || sel?.type === 'overlay', initialMode: addSheet.mode, desktopBottom: tlHeight + 8, onClose: () => setAddSheet(null), onUpload: (files) => onUpload(files), onAdd: async (pick, mode) => {
+                    const v = await resolvePick(pick);
+                    return v ? placeMedia(v, mode) : false;
+                } })), job?.status === 'done' && job.videoUrl && (_jsx("a", { href: `${API_BASE}${job.videoUrl}`, target: "_blank", rel: "noreferrer", className: "fixed top-14 right-4 z-50 bg-emerald-600 text-xs font-semibold px-3 py-2 rounded-lg shadow-xl", onClick: () => setJob(null), children: "\u2713 Export ready \u2014 open video" }))] }));
 };

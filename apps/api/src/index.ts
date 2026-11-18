@@ -1,3 +1,4 @@
+import './env';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import jwt from '@fastify/jwt';
@@ -12,6 +13,8 @@ import { publishRoutes } from './routes/publish.routes';
 import { aiStudioRoutes } from './routes/ai-studio.routes';
 import { openApiRoutes } from './routes/open-api.routes';
 import { editorRoutes } from './routes/editor.routes';
+import { plannerRoutes } from './routes/planner.routes';
+import { startPlannerWorker } from './services/social/scheduler.worker';
 import { repairMissingProjectSourceVideos } from './services/clipping.pipeline';
 
 export function buildServer() {
@@ -51,6 +54,7 @@ export function buildServer() {
   app.register(aiStudioRoutes);
   app.register(openApiRoutes);
   app.register(editorRoutes);
+  app.register(plannerRoutes);
 
   return app;
 }
@@ -61,6 +65,7 @@ if (require.main === module) {
   app
     .listen({ port, host: '0.0.0.0' })
     .then(() => {
+      startPlannerWorker();
       repairMissingProjectSourceVideos().catch((e) =>
         console.warn('Background source video repair notice:', e)
       );

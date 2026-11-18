@@ -5,6 +5,7 @@ import { MobileNav } from './MobileNav';
 import { CommandPalette } from './CommandPalette';
 import { UpgradeModal } from './UpgradeModal';
 import { SupportBubble } from './SupportBubble';
+import { Toaster } from './Toaster';
 import { useAppStore } from '../../store/useAppStore';
 
 export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
@@ -56,6 +57,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
       <CommandPalette />
       <UpgradeModal />
       <SupportBubble />
+      <Toaster />
     </div>
   );
 };

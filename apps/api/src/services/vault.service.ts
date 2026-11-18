@@ -11,7 +11,7 @@ const FFPROBE_BIN = fs.existsSync('/usr/local/bin/ffprobe') ? '/usr/local/bin/ff
 const PYTHON_BIN = fs.existsSync('/usr/local/bin/python3') ? '/usr/local/bin/python3' : 'python3';
 
 export const VAULT_ROOT = path.resolve(__dirname, '../../storage/vault');
-export const VAULT_CATEGORIES = ['Reactions', 'Green Screens', 'Rage', 'Sound Effects', 'Anime/Gaming'] as const;
+export const VAULT_CATEGORIES = ['Reactions', 'Green Screens', 'Rage', 'Sound Effects', 'Anime/Gaming', 'Clips'] as const;
 export type VaultCategory = (typeof VAULT_CATEGORIES)[number];
 
 /** A meme / SFX in a workspace's vault (storage/vault/<workspaceId>/index.json). */

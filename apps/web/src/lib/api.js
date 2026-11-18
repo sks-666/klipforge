@@ -39,6 +39,7 @@ export async function apiFetch(path, options = {}, retries = 2) {
             status: res.status,
             code: data.code,
             field: data.field,
+            data,
         });
     }
     return data;

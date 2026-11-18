@@ -60,7 +60,15 @@ export const useAppStore = create<AppState>((set, get) => ({
   user: null,
   activeWorkspace: null,
   workspaces: [],
-  activeTab: 'home',
+  // /workspace?tab=calendar (e.g. coming back from a YouTube sign-in) opens that tab directly
+  activeTab: (() => {
+    try {
+      const t = new URLSearchParams(window.location.search).get('tab');
+      return (['home', 'projects', 'exported', 'calendar', 'analytics', 'brand-kit', 'shared'].includes(t || '') ? t : 'home') as WorkspaceTab;
+    } catch {
+      return 'home' as WorkspaceTab;
+    }
+  })(),
   isUpgradeModalOpen: false,
   isCommandPaletteOpen: false,
   isMobileNavOpen: false,

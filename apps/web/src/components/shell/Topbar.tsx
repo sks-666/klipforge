@@ -13,6 +13,7 @@ import {
   Menu,
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
+import { NotificationBell } from './NotificationBell';
 
 export const Topbar: React.FC = () => {
   const navigate = useNavigate();
@@ -75,6 +76,8 @@ export const Topbar: React.FC = () => {
           <Gift className="w-4 h-4" />
           <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 rounded-full bg-rose-500 border-2 border-white" />
         </button>
+
+        <NotificationBell />
 
         {/* Community & Help Icons */}
         <button

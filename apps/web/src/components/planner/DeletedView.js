@@ -1,0 +1,16 @@
+import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { useState } from 'react';
+import { RotateCcw, Trash2 } from 'lucide-react';
+import { fmtDateTime } from '../../lib/time';
+import { postPlatforms, usePlannerStore } from '../../store/usePlannerStore';
+import { PlatformIcon } from './platforms';
+import { mediaSrc } from './PostCard';
+export const DeletedView = () => {
+    const { deleted, tz, restorePost, deleteForever } = usePlannerStore();
+    const [confirm, setConfirm] = useState(null);
+    const daysLeft = (iso) => (iso ? Math.max(0, Math.ceil((Date.parse(iso) - Date.now()) / 86400_000)) : 0);
+    return (_jsxs("div", { className: "space-y-3", children: [_jsx("p", { className: "text-xs text-zinc-500", children: "Deleted posts are kept for 30 days, then removed for good." }), _jsx("div", { className: "bg-white dark:bg-zinc-900 rounded-2xl border border-zinc-200 dark:border-zinc-800 overflow-hidden", children: deleted.length === 0 ? (_jsx("p", { className: "text-center text-xs text-zinc-500 py-12", children: "Nothing in Deleted posts." })) : (_jsx("ul", { className: "divide-y divide-zinc-100 dark:divide-zinc-800", children: deleted.map((p) => (_jsxs("li", { className: "flex items-center gap-3 px-3 sm:px-4 py-3", children: [p.thumbnailUrl ? _jsx("img", { src: mediaSrc(p.thumbnailUrl), alt: "", loading: "lazy", className: "w-10 h-16 rounded-lg object-cover opacity-70" }) : _jsx("div", { className: "w-10 h-16 rounded-lg bg-zinc-200 dark:bg-zinc-800" }), _jsxs("div", { className: "min-w-0 flex-1", children: [_jsx("p", { className: "text-xs sm:text-sm line-clamp-2 break-words text-zinc-600 dark:text-zinc-300", children: p.caption || p.title || 'No caption' }), _jsxs("div", { className: "flex flex-wrap items-center gap-2 mt-1 text-[11px] text-zinc-500", children: [_jsx("span", { className: "flex gap-0.5", children: postPlatforms(p).map((pl) => (_jsx(PlatformIcon, { platform: pl, size: 14 }, pl))) }), p.isTemplate && _jsx("span", { className: "px-1.5 rounded bg-zinc-100 dark:bg-zinc-800", children: "Library" }), _jsxs("span", { children: ["Deleted ", p.deletedAt ? fmtDateTime(p.deletedAt, tz) : ''] }), _jsxs("span", { className: "text-amber-600 font-semibold", children: [daysLeft(p.purgeAt), " days left"] })] })] }), _jsxs("div", { className: "flex items-center gap-1.5 shrink-0", children: [_jsxs("button", { onClick: () => restorePost(p.id), className: "flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 text-xs font-semibold", children: [_jsx(RotateCcw, { className: "w-3.5 h-3.5" }), " ", _jsx("span", { className: "hidden sm:inline", children: "Restore" })] }), confirm === p.id ? (_jsx("button", { onClick: () => {
+                                            deleteForever(p.id);
+                                            setConfirm(null);
+                                        }, className: "px-2.5 py-1.5 rounded-lg bg-rose-600 text-white text-xs font-semibold", children: "Confirm" })) : (_jsxs("button", { onClick: () => setConfirm(p.id), className: "flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-rose-200 dark:border-rose-900 text-rose-600 text-xs font-semibold", children: [_jsx(Trash2, { className: "w-3.5 h-3.5" }), " ", _jsx("span", { className: "hidden sm:inline", children: "Delete forever" })] }))] })] }, p.id))) })) })] }));
+};

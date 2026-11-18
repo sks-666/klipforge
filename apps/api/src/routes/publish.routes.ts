@@ -15,9 +15,10 @@ export const PLATFORM_CHAR_LIMITS: Record<string, { post: number; title?: number
   linkedin: { post: 3000 },
 };
 
-function encryptToken(raw: string): string {
-  return Buffer.from(`enc:${raw}`).toString('base64');
-}
+import { encryptSecret } from '../lib/crypto';
+import { serializeAccount } from '../services/social/planner.service';
+
+const encryptToken = (raw: string): string => encryptSecret(raw);
 
 export function generateSocialCaption(params: {
   transcript: string;
@@ -72,10 +73,11 @@ export async function publishRoutes(app: FastifyInstance) {
     });
 
     const limit = ws.plan.social_limit;
-    const hydrated = accounts.map((acc, index) => ({
-      ...acc,
-      status: index >= limit ? 'locked' : acc.status,
-    }));
+    // Tokens never leave the server: only the public account fields are returned.
+    const hydrated = accounts.map((acc: any, index: number) => {
+      const pub = serializeAccount(acc);
+      return { ...pub, profile_pic: pub.avatarUrl, status: index >= limit ? 'locked' : acc.status };
+    });
 
     return {
       publishAccounts: hydrated,
@@ -118,10 +120,12 @@ export async function publishRoutes(app: FastifyInstance) {
         refresh_enc: encryptToken(`refresh_${Date.now()}`),
         expires_at: new Date(Date.now() + 60 * 86400 * 1000),
         status: 'active',
+        mode: 'sandbox',
+        last_error: null,
       },
     });
 
-    return { account };
+    return { account: serializeAccount(account) };
   });
 
   app.delete('/api/v1/social-accounts/:id', { preHandler: [requireRole('editor')] }, async (req) => {

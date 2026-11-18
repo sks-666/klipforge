@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { isUnlimitedCreditsWorkspace } from '../lib/credits';
 import { requireAuth, requireRole } from '../middleware/auth';
+import { backfillEditorExports } from '../services/exports.service';
 import {
   CLIPS_STORAGE_DIR,
   UPLOADS_STORAGE_DIR,
@@ -730,7 +731,9 @@ export async function projectRoutes(app: FastifyInstance) {
 
   // [OBSERVED endpoint: final-video/list] for Exported tab
   app.post('/api/v1/final-video/list', { preHandler: [requireAuth] }, async (req) => {
-    const videos = await prisma.finalVideo.findMany({
+    // Adopt clips exported from the editor before exports were recorded.
+    await backfillEditorExports(req.user.workspaceId).catch(() => {});
+    const all = await prisma.finalVideo.findMany({
       where: {
         clip: {
           project: {
@@ -740,11 +743,35 @@ export async function projectRoutes(app: FastifyInstance) {
         },
       },
       include: {
-        clip: { select: { id: true, title: true, project_id: true, ratio: true } },
+        clip: { select: { id: true, title: true, project_id: true, ratio: true, edit_doc_json: true } },
         asset: { select: { duration_ms: true, storage_key: true } },
       },
       orderBy: { created_at: 'desc' },
     });
+    // 'editor' = the clip was edited in the editing tools (timeline / captions); 'auto' = the default
+    // clip generated from the long video.
+    const sourceOf = (clip: any): 'editor' | 'auto' => {
+      const doc = (clip?.edit_doc_json || {}) as any;
+      return doc.timeline || typeof doc.timelineDuration === 'number' || doc.captionsEdited ? 'editor' : 'auto';
+    };
+    // A clip's re-exports all overwrite one MP4, so show each clip once (its newest export).
+    const seen = new Set<string>();
+    // Return plain fields only: the full asset/clip records carry BigInt `bytes`, which JSON can't serialize (→ 500).
+    const videos = all
+      .filter((v: any) => (seen.has(v.clip_id) ? false : (seen.add(v.clip_id), true)))
+      .map((v: any) => ({
+        id: v.id,
+        clip_id: v.clip_id,
+        asset_id: v.asset_id,
+        res: v.res,
+        status: v.status,
+        watermark: v.watermark,
+        expires_at: v.expires_at,
+        created_at: v.created_at,
+        source: sourceOf(v.clip),
+        clip: v.clip ? { id: v.clip.id, title: v.clip.title, project_id: v.clip.project_id, ratio: v.clip.ratio } : null,
+        asset: v.asset ? { duration_ms: v.asset.duration_ms, storage_key: v.asset.storage_key } : null,
+      }));
 
     return {
       code: 2000,

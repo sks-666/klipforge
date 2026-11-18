@@ -15,9 +15,11 @@ import {
   X,
   Play,
   Lock,
+  CalendarClock,
 } from 'lucide-react';
 import { apiFetch, API_BASE } from '../lib/api';
 import { useAppStore } from '../store/useAppStore';
+import { usePlannerStore } from '../store/usePlannerStore';
 
 export const ProjectClipsPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
@@ -527,15 +529,20 @@ export const ProjectClipsPage: React.FC = () => {
 
                         {/* Action Buttons Row */}
                         <div className="flex flex-wrap items-center gap-2 pt-1">
-                          <button
-                            onClick={() => {
-                              useAppStore.getState().setActiveTab('calendar');
-                              navigate('/workspace');
-                            }}
-                            className="px-3.5 py-1.5 rounded-xl bg-[#5b3bb5] text-white text-xs font-semibold"
-                          >
-                            Publish
-                          </button>
+                          {project.status === 'done' && (
+                            <button
+                              onClick={() => {
+                                // Opens the planner composer with this clip already selected.
+                                usePlannerStore.getState().requestCompose({ clipId: clip.id, projectId: project.id });
+                                usePlannerStore.getState().setTab('calendar');
+                                useAppStore.getState().setActiveTab('calendar');
+                                navigate('/workspace');
+                              }}
+                              className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-xl bg-gradient-to-r from-[#5b3bb5] to-fuchsia-600 text-white text-xs font-semibold shadow-sm"
+                            >
+                              <CalendarClock className="w-3.5 h-3.5" /> Schedule
+                            </button>
+                          )}
                           <a
                             href={`${API_BASE}/media/clips/${clip.id}.mp4?download=1`}
                             download={`${clip.id}.mp4`}

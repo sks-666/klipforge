@@ -316,6 +316,8 @@ model SocialAccount {
   refresh_enc  String?
   expires_at   DateTime?
   status       String       @default("active") // active | expired | locked
+  mode         String       @default("sandbox") // sandbox | live
+  last_error   String?
   created_at   DateTime     @default(now())
 
   workspace    Workspace    @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
@@ -475,4 +477,117 @@ model PopupSeen {
 
   @@id([user_id, popup_key])
   @@map("popups_seen")
+}
+
+// ─── Social planner (Calendar tab) ───────────────────────────────────────────
+// All times are stored in UTC and rendered in the viewer's timezone.
+
+model Post {
+  id               String    @id @default(cuid())
+  workspace_id     String
+  created_by       String
+  project_id       String?
+  clip_id          String?
+  media_url        String?
+  thumbnail_url    String?
+  media_meta       Json?     // { width, height, durationSec, bytes, kind }
+  caption          String    @default("")
+  hashtags         Json?     // string[]
+  title            String?
+  first_comment    String?
+  status           String    @default("draft") // draft|scheduled|publishing|published|failed|deleted
+  prev_status      String?   // restored to this when undeleted
+  is_template      Boolean   @default(false) // Posts library item
+  autolist_id      String?
+  autolist_slot_key String?  // "<autolistId>@<slot ISO>" so a slot is filled once
+  scheduled_at_utc DateTime?
+  published_at     DateTime?
+  deleted_at       DateTime?
+  created_at       DateTime  @default(now())
+  updated_at       DateTime  @updatedAt
+
+  targets          PostTarget[]
+
+  @@index([workspace_id, scheduled_at_utc])
+  @@map("posts")
+}
+
+model PostTarget {
+  id                 String    @id @default(cuid())
+  post_id            String
+  account_id         String
+  platform           String
+  platform_overrides Json?     // { caption, title, firstComment }
+  status             String    @default("pending") // pending|scheduled|publishing|published|failed|canceled
+  attempts           Int       @default(0)
+  next_attempt_at    DateTime?
+  lease_id           String?   // set while a worker owns this target
+  lease_until        DateTime?
+  idempotency_key    String    // stable per target; adapters de-duplicate on it
+  remote_post_id     String?
+  remote_url         String?
+  error              String?
+  published_at       DateTime?
+  created_at         DateTime  @default(now())
+
+  post               Post      @relation(fields: [post_id], references: [id], onDelete: Cascade)
+
+  @@index([status, next_attempt_at])
+  @@map("post_targets")
+}
+
+model Autolist {
+  id           String    @id @default(cuid())
+  workspace_id String
+  name         String
+  account_ids  Json      // string[]
+  loop         Boolean   @default(true) // false = stop when empty
+  active       Boolean   @default(true)
+  timezone     String    @default("UTC") // slots are wall-clock times in this zone
+  next_index   Int       @default(0)
+  created_at   DateTime  @default(now())
+
+  slots        AutolistSlot[]
+  items        AutolistItem[]
+
+  @@map("autolists")
+}
+
+model AutolistSlot {
+  id          String   @id @default(cuid())
+  autolist_id String
+  weekday     Int      // 0 = Sunday
+  time        String   // "19:00"
+
+  autolist    Autolist @relation(fields: [autolist_id], references: [id], onDelete: Cascade)
+
+  @@map("autolist_slots")
+}
+
+model AutolistItem {
+  id               String    @id @default(cuid())
+  autolist_id      String
+  post_id          String    // a library/template post
+  position         Int
+  use_count        Int       @default(0)
+  last_used_at_utc DateTime?
+
+  autolist         Autolist  @relation(fields: [autolist_id], references: [id], onDelete: Cascade)
+
+  @@map("autolist_items")
+}
+
+model Notification {
+  id           String    @id @default(cuid())
+  workspace_id String
+  user_id      String?
+  kind         String    // publish_success | publish_failed | autolist_empty
+  title        String
+  body         String?
+  post_id      String?
+  read_at      DateTime?
+  created_at   DateTime  @default(now())
+
+  @@index([workspace_id, created_at])
+  @@map("notifications")
 }

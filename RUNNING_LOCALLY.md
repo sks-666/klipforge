@@ -85,6 +85,18 @@ A fresh install from the GitHub repo has **unlimited access out of the box**, so
 - Passwords are stored as salted scrypt hashes. Login, registration and password changes are rate-limited (10 failed attempts per 15 minutes).
 - To turn off demo auto-login entirely (e.g. on a shared server), build the web app with `VITE_DEMO_AUTOLOGIN=false`.
 
+### Social planner (Calendar tab)
+
+**Workspace → Calendar** is a post scheduler modelled on Metricool's Planner, with five tabs: **Calendar, List, Posts library, Autolists and Deleted posts**.
+
+- **Accounts:** link TikTok, YouTube Shorts, Instagram Reels, LinkedIn, X or Facebook as **sandbox** accounts. These schedule, publish and fail exactly like real accounts, without posting anywhere. Manage them under the accounts button (top right of the planner). OAuth tokens are encrypted at rest (AES-256-GCM with `ENCRYPTION_KEY`) and never sent to the browser.
+- **Scheduling:** press **Schedule** on any finished clip in a project, or **+ Create post** / click an empty calendar slot. Every platform gets its own tab for caption, title and first comment, with live limits and validation, plus a phone preview and an **AI caption** button. Drag a card to reschedule it.
+- **Times:** stored in UTC and shown in your browser's timezone (change it under ⋮ → Change timezone).
+- **Publishing worker:** runs inside the API and checks every minute (`PLANNER_TICK_MS`). It publishes due posts, retries failures 3 times (after 1, 5 and 15 minutes), can't post the same target twice, fills autolist slots, and permanently removes posts deleted more than 30 days ago. Put `#fail` in a sandbox caption to test failures and Retry.
+- **Monthly post limit:** 20 posts per user (`POST_QUOTA_MONTHLY`), enforced by the API. In unlimited access mode there is no limit.
+- **Real platforms:** live publishing is stubbed until you set the platform keys on the API: `TIKTOK_CLIENT_KEY`/`TIKTOK_CLIENT_SECRET`, `YOUTUBE_CLIENT_ID`/`YOUTUBE_CLIENT_SECRET`, `META_APP_ID`/`META_APP_SECRET`, `LINKEDIN_CLIENT_ID`/`LINKEDIN_CLIENT_SECRET`, `X_CLIENT_ID`/`X_CLIENT_SECRET`. Each stub in `apps/api/src/services/social/providers/live.ts` names the API it needs to call.
+- **Best-time heatmap:** uses mock engagement data from `getBestTimes()` in `apps/api/src/services/social/planner.service.ts`, ready to be replaced with real analytics.
+
 ---
 
 ## 5. Useful Commands

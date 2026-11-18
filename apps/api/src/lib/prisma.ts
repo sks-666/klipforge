@@ -37,6 +37,12 @@ interface Store {
   apiKeys: any[];
   webhooks: any[];
   popupsSeen: any[];
+  posts: any[];
+  postTargets: any[];
+  autolists: any[];
+  autolistSlots: any[];
+  autolistItems: any[];
+  notifications: any[];
 }
 
 function createSeededStore(): Store {
@@ -383,6 +389,12 @@ function createSeededStore(): Store {
     apiKeys: [],
     webhooks: [],
     popupsSeen: [],
+    posts: [],
+    postTargets: [],
+    autolists: [],
+    autolistSlots: [],
+    autolistItems: [],
+    notifications: [],
   };
 }
 
@@ -398,6 +410,13 @@ const DATE_FIELDS = new Set([
   'scheduled_at',
   'last_used_at',
   'revoked_at',
+  'scheduled_at_utc',
+  'published_at',
+  'next_attempt_at',
+  'lease_until',
+  'read_at',
+  'last_used_at_utc',
+  'slot_at_utc',
 ]);
 
 const BIGINT_FIELDS = new Set(['storage_bytes', 'bytes']);
@@ -441,6 +460,9 @@ function loadStoreFromDisk(): Store {
           ? parsed.workspaces.find((w: any) => w.id === 'ws_demo')
           : null;
         let changed = false;
+        for (const t of ['posts', 'postTargets', 'autolists', 'autolistSlots', 'autolistItems', 'notifications']) {
+          if (!Array.isArray((parsed as any)[t])) { (parsed as any)[t] = []; changed = true; }
+        }
         if (demoWs && Number(demoWs.credits_balance || 0) < 999999999) {
           demoWs.credits_balance = 999999999;
           changed = true;
@@ -512,7 +534,23 @@ function matchesWhere(item: any, where: any): boolean {
       if (!hasMatch) return false;
       continue;
     }
-    if (typeof v === 'object' && v !== null && !(v instanceof Date)) {
+    if (typeof v === 'object' && v !== null && !(v instanceof Date) && !Array.isArray(v)) {
+      const ops = v as any;
+      if (['in', 'notIn', 'lt', 'lte', 'gt', 'gte', 'not'].some((o) => o in ops)) {
+        const cur = item[k];
+        const num = (x: any) => (x instanceof Date ? x.getTime() : typeof x === 'string' && /^\d{4}-\d{2}-\d{2}T/.test(x) ? Date.parse(x) : x);
+        if ('in' in ops && !(ops.in as any[]).includes(cur)) return false;
+        if ('notIn' in ops && (ops.notIn as any[]).includes(cur)) return false;
+        if ('not' in ops) {
+          if (ops.not === null ? cur === null || cur === undefined : cur === ops.not) return false;
+        }
+        const cv = num(cur);
+        if ('lt' in ops && !(cur != null && cv < num(ops.lt))) return false;
+        if ('lte' in ops && !(cur != null && cv <= num(ops.lte))) return false;
+        if ('gt' in ops && !(cur != null && cv > num(ops.gt))) return false;
+        if ('gte' in ops && !(cur != null && cv >= num(ops.gte))) return false;
+        continue;
+      }
       if ('contains' in v) {
         const hay = String(item[k] || '').toLowerCase();
         const needle = String((v as any).contains || '').toLowerCase();
@@ -657,7 +695,8 @@ function makeModelDelegate(table: keyof Store, idPrefix: string) {
     async findMany(args?: any) {
       let list = store[table].filter((item) => matchesWhere(item, args?.where));
       if (args?.orderBy) {
-        const [field, dir] = Object.entries(args.orderBy)[0] as [string, 'asc' | 'desc'];
+        const ob = Array.isArray(args.orderBy) ? args.orderBy[0] : args.orderBy;
+        const [field, dir] = Object.entries(ob)[0] as [string, 'asc' | 'desc'];
         list = [...list].sort((a, b) => {
           const av = a[field] instanceof Date ? a[field].getTime() : a[field];
           const bv = b[field] instanceof Date ? b[field].getTime() : b[field];
@@ -666,6 +705,7 @@ function makeModelDelegate(table: keyof Store, idPrefix: string) {
           return 0;
         });
       }
+      if (args?.skip) list = list.slice(args.skip);
       if (args?.take) {
         list = list.slice(0, args.take);
       }
@@ -750,6 +790,16 @@ function makeModelDelegate(table: keyof Store, idPrefix: string) {
       saveStoreToDisk(store);
       return { count };
     },
+    async count(args?: any) {
+      return store[table].filter((item) => matchesWhere(item, args?.where)).length;
+    },
+    async delete(args: any) {
+      const idx = store[table].findIndex((item) => matchesWhere(item, args.where));
+      if (idx === -1) throw new Error(`Record to delete not found in ${String(table)}`);
+      const [removed] = store[table].splice(idx, 1);
+      saveStoreToDisk(store);
+      return removed;
+    },
     async deleteMany(args?: any) {
       const before = store[table].length;
       store[table] = store[table].filter((item) => !matchesWhere(item, args?.where));
@@ -791,6 +841,12 @@ export const prisma: any = {
   apiKey: makeModelDelegate('apiKeys', 'key'),
   webhook: makeModelDelegate('webhooks', 'wh'),
   popupSeen: makeModelDelegate('popupsSeen', 'pop'),
+  post: makeModelDelegate('posts', 'post'),
+  postTarget: makeModelDelegate('postTargets', 'ptg'),
+  autolist: makeModelDelegate('autolists', 'al'),
+  autolistSlot: makeModelDelegate('autolistSlots', 'als'),
+  autolistItem: makeModelDelegate('autolistItems', 'ali'),
+  notification: makeModelDelegate('notifications', 'ntf'),
   async $transaction(fn: (tx: any) => Promise<any>) {
     return fn(prisma);
   },
