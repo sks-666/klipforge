@@ -13,13 +13,14 @@ import { FFMPEG_BIN } from '../services/clipping.pipeline';
 import { probeVaultFile, mimeFor } from '../services/vault.service';
 import { getAdapter } from '../services/social/adapters';
 import { youtubeAdapter, youtubeAuthUrl, youtubeConfigured } from '../services/social/providers/youtube';
-import { pkcePair, tiktokAdapter, tiktokAuthUrl, tiktokConfigured } from '../services/social/providers/tiktok';
+import { pkcePair, tiktokAdapter, tiktokAuthUrl, tiktokConfigured, tiktokCreatorInfo } from '../services/social/providers/tiktok';
 import { metaAuthUrl, metaConfigured, metaConnect, MetaConnection } from '../services/social/providers/meta';
 import { normalizePlatform, PLATFORM_IDS, PLATFORMS, PlatformId } from '../services/social/platforms';
 import {
   assertQuota,
   clipMedia,
   combineBestTimes,
+  credentialsFor,
   generateCaption,
   getBestTimes,
   isValidTimeZone,
@@ -47,6 +48,18 @@ const overrideSchema = z.object({
   title: z.string().max(200).nullable().optional(),
   firstComment: z.string().max(10000).nullable().optional(),
   privacy: z.enum(['public', 'unlisted', 'private']).optional(),
+  tiktok: z
+    .object({
+      privacyLevel: z.enum(['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'FOLLOWER_OF_CREATOR', 'SELF_ONLY']),
+      allowComment: z.boolean(),
+      allowDuet: z.boolean(),
+      allowStitch: z.boolean(),
+      brandOrganic: z.boolean(),
+      brandedContent: z.boolean(),
+    })
+    .refine((t) => !(t.brandedContent && t.privacyLevel === 'SELF_ONLY'), { message: 'Branded content can’t be posted as “Only me”.' })
+    .nullable()
+    .optional(),
 });
 
 const postBody = z.object({
@@ -298,6 +311,41 @@ export async function plannerRoutes(app: FastifyInstance) {
       return back({ connected: platform, channel: res.page || res.username });
     } catch (e: any) {
       return back({ connect_error: e?.message || `${name} sign-in failed.` });
+    }
+  });
+
+  // TikTok Content Posting API: the composer reads the creator's current posting options
+  // (nickname, avatar, allowed privacy levels, comment/duet/stitch, max duration) before every post.
+  app.get('/api/v1/planner/accounts/:id/tiktok/creator-info', { preHandler: [requireAuth] }, async (req, reply) => {
+    try {
+      const { id } = req.params as { id: string };
+      const acc = await prisma.socialAccount.findFirst({ where: { id, workspace_id: req.user.workspaceId, platform: 'tiktok' } });
+      if (!acc) throw new PlannerError('TikTok account not found', 404);
+      if (acc.mode !== 'live') {
+        return {
+          creatorAvatarUrl: acc.profile_pic || null,
+          creatorUsername: acc.username,
+          creatorNickname: acc.username,
+          privacyLevelOptions: ['PUBLIC_TO_EVERYONE', 'MUTUAL_FOLLOW_FRIENDS', 'FOLLOWER_OF_CREATOR', 'SELF_ONLY'],
+          commentDisabled: false,
+          duetDisabled: false,
+          stitchDisabled: false,
+          maxVideoPostDurationSec: 600,
+        };
+      }
+      const creds = credentialsFor(acc);
+      if (creds.expiresAt && creds.expiresAt.getTime() < Date.now() + 60_000) {
+        const fresh = await tiktokAdapter().refreshToken(creds);
+        creds.accessToken = fresh.accessToken;
+        await prisma.socialAccount.update({
+          where: { id: acc.id },
+          data: { token_enc: encryptSecret(fresh.accessToken), refresh_enc: fresh.refreshToken ? encryptSecret(fresh.refreshToken) : acc.refresh_enc, expires_at: fresh.expiresAt || acc.expires_at },
+        });
+      }
+      if (!creds.accessToken) throw new PlannerError('TikTok access is missing. Reconnect the account.', 400);
+      return await tiktokCreatorInfo(creds.accessToken);
+    } catch (err) {
+      return fail(reply, err);
     }
   });
 

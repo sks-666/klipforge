@@ -32,6 +32,20 @@ export interface PublishPayload {
   firstComment?: string | null;
   /** YouTube visibility; other platforms ignore it */
   privacy?: 'public' | 'unlisted' | 'private';
+  /** TikTok Direct Post settings chosen by the creator in the composer */
+  tiktok?: TikTokPostSettings | null;
+}
+
+export type TikTokPrivacyLevel = 'PUBLIC_TO_EVERYONE' | 'MUTUAL_FOLLOW_FRIENDS' | 'FOLLOWER_OF_CREATOR' | 'SELF_ONLY';
+export interface TikTokPostSettings {
+  privacyLevel: TikTokPrivacyLevel;
+  allowComment: boolean;
+  allowDuet: boolean;
+  allowStitch: boolean;
+  /** Commercial content disclosure: promoting yourself / your own business */
+  brandOrganic: boolean;
+  /** Commercial content disclosure: paid partnership with a third-party brand */
+  brandedContent: boolean;
 }
 
 export interface PublishResult {

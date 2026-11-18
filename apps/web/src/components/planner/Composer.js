@@ -9,6 +9,7 @@ import { PlatformIcon, PLATFORMS, validateForPlatform } from './platforms';
 import { PlatformPreview } from './PlatformPreview';
 import { mediaSrc } from './PostCard';
 import { nextBestSlot } from './CalendarView';
+import { draftFromStored, TikTokPostSettings, tiktokPayload, tiktokProblems } from './TikTokPostSettings';
 const EMPTY_MEDIA = { projectId: null, clipId: null, mediaUrl: null, thumbnailUrl: null, mediaMeta: null, label: '' };
 const RATIO_DIMS = { '9:16': [1080, 1920], '1:1': [1080, 1080], '4:5': [1080, 1350], '16:9': [1920, 1080] };
 const BASE_TAGS = ['#gaming', '#clips', '#viral', '#fyp', '#shorts', '#reels', '#gamer', '#highlights'];
@@ -37,6 +38,7 @@ export const Composer = () => {
     const [uploadPct, setUploadPct] = useState(null);
     const [autolistMenu, setAutolistMenu] = useState(false);
     const [previewFor, setPreviewFor] = useState(null);
+    const [creatorInfo, setCreatorInfo] = useState({});
     const fileRef = useRef(null);
     // ── Seed ────────────────────────────────────────────────────────────────
     useEffect(() => {
@@ -57,7 +59,7 @@ export const Composer = () => {
             setAccountIds(src.targets.map((t) => t.accountId).filter((id) => accounts.some((a) => a.id === id)));
             setOverrides(Object.fromEntries(src.targets.map((t) => [
                 t.accountId,
-                { caption: t.overrides.caption || '', title: t.overrides.title || '', firstComment: t.overrides.firstComment || '', privacy: t.overrides.privacy || undefined },
+                { caption: t.overrides.caption || '', title: t.overrides.title || '', firstComment: t.overrides.firstComment || '', privacy: t.overrides.privacy || undefined, tiktok: draftFromStored(t.overrides.tiktok) },
             ])));
         }
         const at = seed.scheduledAt || editing?.scheduledAt;
@@ -99,11 +101,13 @@ export const Composer = () => {
         const out = {};
         for (const a of selectedAccounts) {
             const errs = validateForPlatform(a.platform, contentFor(a.id), sel.mediaMeta);
+            if (a.platform === 'tiktok' && !isTemplate)
+                errs.push(...tiktokProblems(overrides[a.id]?.tiktok, creatorInfo[a.id], sel.mediaMeta?.durationSec));
             if (errs.length)
                 out[a.id] = errs;
         }
         return out;
-    }, [selectedAccounts, overrides, caption, title, firstComment, sel.mediaMeta]); // eslint-disable-line react-hooks/exhaustive-deps
+    }, [selectedAccounts, overrides, caption, title, firstComment, sel.mediaMeta, creatorInfo, isTemplate]); // eslint-disable-line react-hooks/exhaustive-deps
     const hasProblems = Object.keys(problems).length > 0;
     const captionLimit = activeAccount
         ? PLATFORMS[activeAccount.platform].captionMax
@@ -205,7 +209,8 @@ export const Composer = () => {
             accountIds,
             overrides: Object.fromEntries(accountIds.map((id) => {
                 const o = overrides[id] || {};
-                return [id, { caption: o.caption || null, title: o.title || null, firstComment: o.firstComment || null, ...(o.privacy ? { privacy: o.privacy } : {}) }];
+                const tt = tiktokPayload(o.tiktok);
+                return [id, { caption: o.caption || null, title: o.title || null, firstComment: o.firstComment || null, ...(o.privacy ? { privacy: o.privacy } : {}), ...(tt ? { tiktok: tt } : {}) }];
             })),
             scheduledAt: at ? new Date(at).toISOString() : null,
         };
@@ -229,6 +234,8 @@ export const Composer = () => {
                     toast.error('Publishing failed', p.targets.find((t) => t.error)?.error || undefined);
                 else
                     toast.info('Publishing…', 'We’ll notify you when it’s live.');
+                if (p.targets.some((t) => t.platform === 'tiktok') && p.status !== 'failed')
+                    toast.info('Sent to TikTok', 'Your video may take a few minutes to process before it appears on your TikTok profile.');
                 window.dispatchEvent(new Event('kf:notifications-poll'));
             }
             else if (action === 'template') {
@@ -318,16 +325,19 @@ export const Composer = () => {
                                                                     setPreviewFor(a.id);
                                                                 }, className: `flex items-center gap-1 px-3 py-2 text-xs font-semibold border-b-2 -mb-px whitespace-nowrap ${tab === a.id ? 'border-[#5b3bb5] text-[#5b3bb5]' : 'border-transparent text-zinc-500'}`, children: [_jsx(PlatformIcon, { platform: a.platform, size: 14 }), " ", PLATFORMS[a.platform]?.short, errs?.length ? _jsx(AlertTriangle, { className: "w-3.5 h-3.5 text-rose-500" }) : overrides[a.id]?.caption || overrides[a.id]?.title ? _jsx("span", { className: "w-1.5 h-1.5 rounded-full bg-[#5b3bb5]" }) : null] }, a.id));
                                                         })] })), _jsxs("div", { className: "p-4 space-y-3", children: [activeAccount && _jsxs("p", { className: "text-[11px] text-zinc-500", children: ["Leave a field empty to use the \u201CAll platforms\u201D text for ", PLATFORMS[activeAccount.platform]?.name, "."] }), (youtubeSelected && (!activeAccount || activeAccount.platform === 'youtube')) || (isTemplate && !activeAccount) ? (_jsxs("div", { children: [_jsxs("div", { className: "flex justify-between text-[11px] font-semibold text-zinc-500 mb-1", children: [_jsxs("label", { htmlFor: "kf-title", children: ["Title ", youtubeSelected ? '(YouTube)' : ''] }), _jsxs("span", { className: (activeAccount ? contentFor(activeAccount.id).title : title).length > 100 ? 'text-rose-600' : '', children: [(activeAccount ? overrides[activeAccount.id]?.title ?? '' : title).length, "/100"] })] }), _jsx("input", { id: "kf-title", disabled: readOnly, value: activeAccount ? overrides[activeAccount.id]?.title ?? '' : title, onChange: (e) => setField('title', e.target.value), placeholder: activeAccount ? title || 'Video title' : 'Video title', className: "w-full px-3 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-transparent text-sm" })] })) : null, _jsxs("div", { children: [_jsxs("div", { className: "flex items-center justify-between gap-2 text-[11px] font-semibold text-zinc-500 mb-1", children: [_jsx("label", { htmlFor: "kf-caption", children: "Caption" }), _jsxs("span", { className: effectiveCaption.length > captionLimit ? 'text-rose-600' : '', children: [effectiveCaption.length, "/", captionLimit] })] }), _jsx("textarea", { id: "kf-caption", disabled: readOnly, rows: 6, value: curCaption, onChange: (e) => setField('caption', e.target.value), placeholder: activeAccount ? caption || 'Caption for this platform' : 'Write a caption… #hashtags', className: "w-full p-3 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-transparent text-sm resize-y" }), !readOnly && (_jsxs("div", { className: "flex flex-wrap items-center gap-1.5 mt-2", children: [_jsxs("button", { onClick: () => runAi(), disabled: aiBusy, className: "flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gradient-to-r from-[#5b3bb5] to-fuchsia-600 text-white text-xs font-semibold disabled:opacity-60", children: [aiBusy ? _jsx(Loader2, { className: "w-3.5 h-3.5 animate-spin" }) : _jsx(Sparkles, { className: "w-3.5 h-3.5" }), " AI caption"] }), _jsxs("select", { value: tone, onChange: (e) => setTone(e.target.value), "aria-label": "Caption tone", className: "px-2 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs", children: [_jsx("option", { value: "hype", children: "Hype" }), _jsx("option", { value: "funny", children: "Funny" }), _jsx("option", { value: "chill", children: "Chill" }), _jsx("option", { value: "pro", children: "Pro" })] }), _jsx("span", { className: "flex items-center gap-1 text-[11px] text-zinc-400 ml-1", children: _jsx(Hash, { className: "w-3 h-3" }) }), tagSuggestions.map((t) => (_jsx("button", { onClick: () => addTag(t), className: "px-2 py-1 rounded-full bg-zinc-100 dark:bg-zinc-800 text-[11px] font-medium hover:bg-purple-100 dark:hover:bg-purple-950/50", children: t }, t)))] }))] }), !isTemplate &&
-                                                            ['youtube', 'tiktok']
+                                                            ['youtube']
                                                                 .filter((pl) => (activeAccount ? activeAccount.platform === pl : selectedAccounts.some((x) => x.platform === pl)))
                                                                 .map((pl) => {
                                                                 const accs = activeAccount ? [activeAccount] : selectedAccounts.filter((x) => x.platform === pl);
-                                                                const labels = pl === 'tiktok' ? { public: 'Public', unlisted: 'Friends', private: 'Only me' } : { public: 'Public', unlisted: 'Unlisted (link only)', private: 'Private (only you)' };
-                                                                return (_jsxs("div", { className: "flex flex-wrap items-center gap-2", children: [_jsxs("label", { htmlFor: `kf-privacy-${pl}`, className: "text-[11px] font-semibold text-zinc-500", children: [pl === 'tiktok' ? 'TikTok' : 'YouTube', " visibility"] }), _jsx("select", { id: `kf-privacy-${pl}`, disabled: readOnly, value: overrides[accs[0].id]?.privacy || 'public', onChange: (e) => {
+                                                                const labels = { public: 'Public', unlisted: 'Unlisted (link only)', private: 'Private (only you)' };
+                                                                return (_jsxs("div", { className: "flex flex-wrap items-center gap-2", children: [_jsx("label", { htmlFor: `kf-privacy-${pl}`, className: "text-[11px] font-semibold text-zinc-500", children: "YouTube visibility" }), _jsx("select", { id: `kf-privacy-${pl}`, disabled: readOnly, value: overrides[accs[0].id]?.privacy || 'public', onChange: (e) => {
                                                                                 const v = e.target.value;
                                                                                 setOverrides((o) => ({ ...o, ...Object.fromEntries(accs.map((x) => [x.id, { ...o[x.id], privacy: v }])) }));
-                                                                            }, className: "px-2 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs", children: ['public', 'unlisted', 'private'].map((v) => (_jsx("option", { value: v, children: labels[v] }, v))) }), pl === 'youtube' && accs.some((x) => x.mode === 'live') && _jsx("span", { className: "text-[11px] text-zinc-500", children: "First comments aren\u2019t posted on YouTube." }), pl === 'tiktok' && accs.some((x) => x.mode === 'live') && (_jsx("span", { className: "text-[11px] text-zinc-500", children: "Until TikTok reviews your app, only \u201COnly me\u201D posts are allowed." }))] }, pl));
-                                                            }), !isTemplate && (_jsxs("div", { children: [_jsxs("div", { className: "flex justify-between text-[11px] font-semibold text-zinc-500 mb-1", children: [_jsx("label", { htmlFor: "kf-comment", children: "First comment (optional)" }), activeAccount && PLATFORMS[activeAccount.platform].firstCommentMax && (_jsxs("span", { children: [contentFor(activeAccount.id).firstComment.length, "/", PLATFORMS[activeAccount.platform].firstCommentMax] }))] }), _jsx("input", { id: "kf-comment", disabled: readOnly, value: activeAccount ? overrides[activeAccount.id]?.firstComment ?? '' : firstComment, onChange: (e) => setField('firstComment', e.target.value), placeholder: activeAccount ? firstComment || 'Pinned first comment' : 'Pinned first comment, e.g. more hashtags', className: "w-full px-3 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-transparent text-sm" })] })), selectedAccounts.map((a) => {
+                                                                            }, className: "px-2 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-700 bg-white dark:bg-zinc-800 text-xs", children: ['public', 'unlisted', 'private'].map((v) => (_jsx("option", { value: v, children: labels[v] }, v))) }), pl === 'youtube' && accs.some((x) => x.mode === 'live') && _jsx("span", { className: "text-[11px] text-zinc-500", children: "First comments aren\u2019t posted on YouTube." })] }, pl));
+                                                            }), !isTemplate &&
+                                                            selectedAccounts
+                                                                .filter((a) => a.platform === 'tiktok' && (!activeAccount || activeAccount.id === a.id))
+                                                                .map((a) => (_jsx(TikTokPostSettings, { account: a, readOnly: readOnly, value: overrides[a.id]?.tiktok, onChange: (tt) => setOverrides((o) => ({ ...o, [a.id]: { ...o[a.id], tiktok: tt } })), onInfo: (info) => setCreatorInfo((c) => ({ ...c, [a.id]: info })) }, a.id))), !isTemplate && (_jsxs("div", { children: [_jsxs("div", { className: "flex justify-between text-[11px] font-semibold text-zinc-500 mb-1", children: [_jsx("label", { htmlFor: "kf-comment", children: "First comment (optional)" }), activeAccount && PLATFORMS[activeAccount.platform].firstCommentMax && (_jsxs("span", { children: [contentFor(activeAccount.id).firstComment.length, "/", PLATFORMS[activeAccount.platform].firstCommentMax] }))] }), _jsx("input", { id: "kf-comment", disabled: readOnly, value: activeAccount ? overrides[activeAccount.id]?.firstComment ?? '' : firstComment, onChange: (e) => setField('firstComment', e.target.value), placeholder: activeAccount ? firstComment || 'Pinned first comment' : 'Pinned first comment, e.g. more hashtags', className: "w-full px-3 py-2 rounded-xl border border-zinc-200 dark:border-zinc-700 bg-transparent text-sm" })] })), selectedAccounts.map((a) => {
                                                             const errs = problems[a.id] || serverProblems[a.id];
                                                             if (!errs?.length || (activeAccount && activeAccount.id !== a.id))
                                                                 return null;

@@ -5,7 +5,7 @@ import { prisma } from '../../lib/prisma';
 import { decryptSecret } from '../../lib/crypto';
 import { unlimitedAccessEnabled } from '../../lib/credits';
 import { CLIPS_STORAGE_DIR } from '../clipping.pipeline';
-import { AccountCredentials } from './adapters';
+import { AccountCredentials, TikTokPostSettings } from './adapters';
 import { MediaMeta, normalizePlatform, PlatformId, PLATFORMS, validateForPlatform } from './platforms';
 
 export const POST_STATUSES = ['draft', 'scheduled', 'publishing', 'published', 'failed', 'deleted'] as const;
@@ -116,7 +116,7 @@ export interface PostInput {
   thumbnailUrl?: string | null;
   mediaMeta?: MediaMeta | null;
   accountIds?: string[];
-  overrides?: Record<string, { caption?: string | null; title?: string | null; firstComment?: string | null; privacy?: 'public' | 'unlisted' | 'private' }>;
+  overrides?: Record<string, { caption?: string | null; title?: string | null; firstComment?: string | null; privacy?: 'public' | 'unlisted' | 'private'; tiktok?: TikTokPostSettings | null }>;
   scheduledAt?: string | null;
 }
 
@@ -128,6 +128,7 @@ export function contentFor(post: any, target: any) {
     title: o.title != null && o.title !== '' ? o.title : post.title,
     firstComment: o.firstComment != null && o.firstComment !== '' ? o.firstComment : post.first_comment,
     privacy: (['public', 'unlisted', 'private'].includes(o.privacy) ? o.privacy : 'public') as 'public' | 'unlisted' | 'private',
+    tiktok: (o.tiktok && typeof o.tiktok === 'object' ? o.tiktok : null) as TikTokPostSettings | null,
   };
 }
 
@@ -252,7 +253,7 @@ export async function syncTargets(post: any, accounts: any[], overrides: PostInp
     const cur = existing.find((t: any) => t.account_id === acc.id);
     const o = overrides?.[acc.id];
     const clean = o
-      ? { caption: o.caption ?? null, title: o.title ?? null, firstComment: o.firstComment ?? null, ...(o.privacy ? { privacy: o.privacy } : {}) }
+      ? { caption: o.caption ?? null, title: o.title ?? null, firstComment: o.firstComment ?? null, ...(o.privacy ? { privacy: o.privacy } : {}), ...(o.tiktok ? { tiktok: o.tiktok } : {}) }
       : cur?.platform_overrides || {};
     if (cur) {
       if (cur.status !== 'published') await prisma.postTarget.update({ where: { id: cur.id }, data: { platform_overrides: clean } });

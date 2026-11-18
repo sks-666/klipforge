@@ -126,6 +126,7 @@ async function processTarget(targetId: string, now: number): Promise<boolean> {
         title: content.title,
         firstComment: content.firstComment,
         privacy: content.privacy,
+        tiktok: content.tiktok,
       });
       outcome = { ok: true, remoteId: res.remotePostId, url: res.url };
     } catch (err: any) {

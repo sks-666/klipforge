@@ -102,6 +102,32 @@ async function tokenRequest(params: Record<string, string>) {
   return j as { access_token: string; refresh_token: string; expires_in: number; open_id: string; scope: string };
 }
 
+export interface TikTokCreatorInfo {
+  creatorAvatarUrl: string | null;
+  creatorUsername: string | null;
+  creatorNickname: string | null;
+  privacyLevelOptions: string[];
+  commentDisabled: boolean;
+  duetDisabled: boolean;
+  stitchDisabled: boolean;
+  maxVideoPostDurationSec: number | null;
+}
+
+/** Content Posting API creator_info: who is posting and what they may post right now. */
+export async function tiktokCreatorInfo(token: string): Promise<TikTokCreatorInfo> {
+  const c = await call(token, 'https://open.tiktokapis.com/v2/post/publish/creator_info/query/', {});
+  return {
+    creatorAvatarUrl: c.creator_avatar_url || null,
+    creatorUsername: c.creator_username || null,
+    creatorNickname: c.creator_nickname || null,
+    privacyLevelOptions: c.privacy_level_options || [],
+    commentDisabled: Boolean(c.comment_disabled),
+    duetDisabled: Boolean(c.duet_disabled),
+    stitchDisabled: Boolean(c.stitch_disabled),
+    maxVideoPostDurationSec: c.max_video_post_duration_sec ?? null,
+  };
+}
+
 /** Upload chunking rules: one chunk up to 64 MB, else 10 MB chunks with the remainder in the last. */
 export function chunkPlan(size: number) {
   const MB = 1024 * 1024;
@@ -147,11 +173,12 @@ export function tiktokAdapter(): SocialAdapter {
       if (!post.mediaPath || !fs.existsSync(post.mediaPath)) throw new AdapterError('The video file for this post is missing', false);
       // 1) what this creator may post right now
       const creator = await call(acc.accessToken, 'https://open.tiktokapis.com/v2/post/publish/creator_info/query/', {});
-      const wanted = PRIVACY[post.privacy || 'public'];
+      const tt = post.tiktok || null;
+      const wanted = tt?.privacyLevel || PRIVACY[post.privacy || 'public'];
       const options: string[] = creator.privacy_level_options || [];
       if (options.length && !options.includes(wanted)) {
         const allowed = options.map((o) => PRIVACY_LABEL[o] || o).join(', ');
-        throw new AdapterError(`TikTok doesn’t allow “${PRIVACY_LABEL[wanted]}” for this account right now (allowed: ${allowed}). Change the TikTok visibility and retry.`, false);
+        throw new AdapterError(`TikTok doesn’t allow “${PRIVACY_LABEL[wanted] || wanted}” for this account right now (allowed: ${allowed}). Change the TikTok visibility and retry.`, false);
       }
       const size = fs.statSync(post.mediaPath).size;
       const { chunkSize, count } = chunkPlan(size);
@@ -160,10 +187,12 @@ export function tiktokAdapter(): SocialAdapter {
         post_info: {
           title: String(post.caption || '').slice(0, 2200),
           privacy_level: wanted,
-          disable_duet: false,
-          disable_comment: Boolean(creator.comment_disabled),
-          disable_stitch: false,
+          disable_duet: tt ? !tt.allowDuet || Boolean(creator.duet_disabled) : Boolean(creator.duet_disabled),
+          disable_comment: tt ? !tt.allowComment || Boolean(creator.comment_disabled) : Boolean(creator.comment_disabled),
+          disable_stitch: tt ? !tt.allowStitch || Boolean(creator.stitch_disabled) : Boolean(creator.stitch_disabled),
           video_cover_timestamp_ms: 1000,
+          brand_content_toggle: Boolean(tt?.brandedContent),
+          brand_organic_toggle: Boolean(tt?.brandOrganic),
         },
         source_info: { source: 'FILE_UPLOAD', video_size: size, chunk_size: chunkSize, total_chunk_count: count },
       });

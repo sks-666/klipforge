@@ -8,6 +8,7 @@ import { PlatformIcon, PlatformId, PLATFORMS, validateForPlatform } from './plat
 import { PlatformPreview } from './PlatformPreview';
 import { mediaSrc } from './PostCard';
 import { nextBestSlot } from './CalendarView';
+import { CreatorInfo, draftFromStored, TikTokDraft, TikTokPostSettings, tiktokPayload, tiktokProblems } from './TikTokPostSettings';
 
 interface MediaSel {
   projectId: string | null;
@@ -19,7 +20,7 @@ interface MediaSel {
 }
 
 type Privacy = 'public' | 'unlisted' | 'private';
-type Override = { caption?: string; title?: string; firstComment?: string; privacy?: Privacy };
+type Override = { caption?: string; title?: string; firstComment?: string; privacy?: Privacy; tiktok?: TikTokDraft };
 
 const EMPTY_MEDIA: MediaSel = { projectId: null, clipId: null, mediaUrl: null, thumbnailUrl: null, mediaMeta: null, label: '' };
 const RATIO_DIMS: Record<string, [number, number]> = { '9:16': [1080, 1920], '1:1': [1080, 1080], '4:5': [1080, 1350], '16:9': [1920, 1080] };
@@ -52,6 +53,7 @@ export const Composer: React.FC = () => {
   const [uploadPct, setUploadPct] = useState<number | null>(null);
   const [autolistMenu, setAutolistMenu] = useState(false);
   const [previewFor, setPreviewFor] = useState<string | null>(null);
+  const [creatorInfo, setCreatorInfo] = useState<Record<string, CreatorInfo | null>>({});
   const fileRef = useRef<HTMLInputElement>(null);
 
   // ── Seed ────────────────────────────────────────────────────────────────
@@ -75,7 +77,7 @@ export const Composer: React.FC = () => {
         Object.fromEntries(
           src.targets.map((t) => [
             t.accountId,
-            { caption: t.overrides.caption || '', title: t.overrides.title || '', firstComment: t.overrides.firstComment || '', privacy: ((t.overrides as any).privacy as Privacy) || undefined },
+            { caption: t.overrides.caption || '', title: t.overrides.title || '', firstComment: t.overrides.firstComment || '', privacy: ((t.overrides as any).privacy as Privacy) || undefined, tiktok: draftFromStored((t.overrides as any).tiktok) },
           ])
         )
       );
@@ -122,10 +124,11 @@ export const Composer: React.FC = () => {
     const out: Record<string, string[]> = {};
     for (const a of selectedAccounts) {
       const errs = validateForPlatform(a.platform as PlatformId, contentFor(a.id), sel.mediaMeta);
+      if (a.platform === 'tiktok' && !isTemplate) errs.push(...tiktokProblems(overrides[a.id]?.tiktok, creatorInfo[a.id], sel.mediaMeta?.durationSec));
       if (errs.length) out[a.id] = errs;
     }
     return out;
-  }, [selectedAccounts, overrides, caption, title, firstComment, sel.mediaMeta]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [selectedAccounts, overrides, caption, title, firstComment, sel.mediaMeta, creatorInfo, isTemplate]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const hasProblems = Object.keys(problems).length > 0;
   const captionLimit = activeAccount
@@ -225,7 +228,8 @@ export const Composer: React.FC = () => {
       overrides: Object.fromEntries(
         accountIds.map((id) => {
           const o = overrides[id] || {};
-          return [id, { caption: o.caption || null, title: o.title || null, firstComment: o.firstComment || null, ...(o.privacy ? { privacy: o.privacy } : {}) }];
+          const tt = tiktokPayload(o.tiktok);
+          return [id, { caption: o.caption || null, title: o.title || null, firstComment: o.firstComment || null, ...(o.privacy ? { privacy: o.privacy } : {}), ...(tt ? { tiktok: tt } : {}) }];
         })
       ),
       scheduledAt: at ? new Date(at).toISOString() : null,
@@ -247,6 +251,8 @@ export const Composer: React.FC = () => {
         if (p.status === 'published') toast.success(`Published to ${p.targets.map((t) => PLATFORMS[t.platform as PlatformId]?.short).join(', ')}`);
         else if (p.status === 'failed') toast.error('Publishing failed', p.targets.find((t) => t.error)?.error || undefined);
         else toast.info('Publishing…', 'We’ll notify you when it’s live.');
+        if (p.targets.some((t) => t.platform === 'tiktok') && p.status !== 'failed')
+          toast.info('Sent to TikTok', 'Your video may take a few minutes to process before it appears on your TikTok profile.');
         window.dispatchEvent(new Event('kf:notifications-poll'));
       } else if (action === 'template') {
         toast.success('Saved to Posts library');
@@ -569,14 +575,14 @@ export const Composer: React.FC = () => {
                   </div>
 
                   {!isTemplate &&
-                    (['youtube', 'tiktok'] as const)
+                    (['youtube'] as const)
                       .filter((pl) => (activeAccount ? activeAccount.platform === pl : selectedAccounts.some((x) => x.platform === pl)))
                       .map((pl) => {
                         const accs = activeAccount ? [activeAccount] : selectedAccounts.filter((x) => x.platform === pl);
-                        const labels = pl === 'tiktok' ? { public: 'Public', unlisted: 'Friends', private: 'Only me' } : { public: 'Public', unlisted: 'Unlisted (link only)', private: 'Private (only you)' };
+                        const labels = { public: 'Public', unlisted: 'Unlisted (link only)', private: 'Private (only you)' };
                         return (
                           <div key={pl} className="flex flex-wrap items-center gap-2">
-                            <label htmlFor={`kf-privacy-${pl}`} className="text-[11px] font-semibold text-zinc-500">{pl === 'tiktok' ? 'TikTok' : 'YouTube'} visibility</label>
+                            <label htmlFor={`kf-privacy-${pl}`} className="text-[11px] font-semibold text-zinc-500">YouTube visibility</label>
                             <select
                               id={`kf-privacy-${pl}`}
                               disabled={readOnly}
@@ -592,12 +598,23 @@ export const Composer: React.FC = () => {
                               ))}
                             </select>
                             {pl === 'youtube' && accs.some((x) => x.mode === 'live') && <span className="text-[11px] text-zinc-500">First comments aren’t posted on YouTube.</span>}
-                            {pl === 'tiktok' && accs.some((x) => x.mode === 'live') && (
-                              <span className="text-[11px] text-zinc-500">Until TikTok reviews your app, only “Only me” posts are allowed.</span>
-                            )}
                           </div>
                         );
                       })}
+
+                  {!isTemplate &&
+                    selectedAccounts
+                      .filter((a) => a.platform === 'tiktok' && (!activeAccount || activeAccount.id === a.id))
+                      .map((a) => (
+                        <TikTokPostSettings
+                          key={a.id}
+                          account={a}
+                          readOnly={readOnly}
+                          value={overrides[a.id]?.tiktok}
+                          onChange={(tt) => setOverrides((o) => ({ ...o, [a.id]: { ...o[a.id], tiktok: tt } }))}
+                          onInfo={(info) => setCreatorInfo((c) => ({ ...c, [a.id]: info }))}
+                        />
+                      ))}
 
                   {!isTemplate && (
                     <div>
