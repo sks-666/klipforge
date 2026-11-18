@@ -10,7 +10,7 @@ Before you submit, remove every other product and scope from the app in the TikT
 1. In the Developer Portal, switch the app to **Sandbox**. Under Sandbox → **Target users**, add the TikTok account you'll sign in with.
 2. Set that TikTok account to **Private** in the TikTok app (Settings → Privacy → Private account). Until the app is audited, TikTok only accepts "Only me" posts from private accounts.
 3. In KlipForge, open the accounts drawer and delete the mock `@klipforge_tiktok` *sandbox* account, so only the real TikTok connection appears.
-4. Use **one browser origin for the whole video.** TikTok sends you back to `TIKTOK_REDIRECT_URI` (`http://localhost:5173/...`). If you start at `192.168.1.68:5173`, the address changes halfway through and you may land logged out. Either record everything on `http://localhost:5173`, or change the redirect URI, both in the portal and in `apps/api/.env`, to the address you record on.
+4. Make sure `http://localhost:5173/api/v1/planner/oauth/tiktok/callback` is listed under Login Kit → Redirect URI in the portal. TikTok returns there, and KlipForge immediately sends you back to the address you started from (for example `http://192.168.1.68:5173/workspace`), still logged in.
 5. Sign out of TikTok in the browser, so the video shows the full TikTok sign-in page.
 6. Use a clean Chrome window at full size, with the address bar visible. Close other tabs and hide your bookmarks.
 

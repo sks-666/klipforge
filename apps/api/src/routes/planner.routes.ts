@@ -184,7 +184,7 @@ export async function plannerRoutes(app: FastifyInstance) {
         .object({ platform: z.enum(PLATFORM_IDS as [PlatformId, ...PlatformId[]]), mode: z.enum(['sandbox', 'live']).default('sandbox'), username: z.string().max(60).optional() })
         .parse(req.body);
       const op = oauthProvider(body.platform);
-      if (body.mode === 'live' && op) return { redirect: oauthStartUrl(op, req.user.workspaceId, req.user.userId, null) };
+      if (body.mode === 'live' && op) return { redirect: oauthStartUrl(op, req.user.workspaceId, req.user.userId, null, returnOrigin(req)) };
       const adapter = getAdapter(body.platform, body.mode);
       let res;
       try {
@@ -253,9 +253,29 @@ export async function plannerRoutes(app: FastifyInstance) {
     else await prisma.socialAccount.create({ data: { ...data, workspace_id: ws } });
   }
 
-  function oauthStartUrl(platform: OAuthPlatform, ws: string, uid: string, accountId: string | null): string {
+  /**
+   * The web address the user started the sign-in from (e.g. http://192.168.1.68:5173), so the
+   * callback, which TikTok must deliver to the registered localhost redirect URI, can send them
+   * back there instead of a different origin where they'd be signed out. Only the configured
+   * WEB_ORIGIN, localhost and private-network addresses are accepted (no open redirect).
+   */
+  function returnOrigin(req: any): string | null {
+    // The dev/preview proxy rewrites Host to the API's own address, so prefer the page's Referer.
+    let host = '';
+    try {
+      const ref = new URL(String(req.headers.referer || ''));
+      if (ref.protocol === 'http:') host = ref.host;
+    } catch {
+      host = String(req.headers['x-forwarded-host'] || req.headers.host || '');
+    }
+    const origin = `http://${host}`;
+    if (process.env.WEB_ORIGIN && origin === process.env.WEB_ORIGIN.replace(/\/$/, '')) return origin;
+    return /^(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3})(:\d{1,5})?$/.test(host) ? origin : null;
+  }
+
+  function oauthStartUrl(platform: OAuthPlatform, ws: string, uid: string, accountId: string | null, origin: string | null = null): string {
     const nonce = crypto.randomBytes(16).toString('hex');
-    const state = app.jwt.sign({ p: platform, ws, uid, acc: accountId, n: nonce } as any, { expiresIn: '15m' });
+    const state = app.jwt.sign({ p: platform, ws, uid, acc: accountId, n: nonce, o: origin } as any, { expiresIn: '15m' });
     if (platform === 'tiktok') {
       const now = Date.now();
       for (const [k, v] of pkceVerifiers) if (v.exp < now) pkceVerifiers.delete(k);
@@ -272,14 +292,22 @@ export async function plannerRoutes(app: FastifyInstance) {
     const op = oauthProvider(platform);
     if (!op) return reply.status(400).send({ code: 400, errMsg: `${platform} sign-in isn’t configured on the server.` });
     const { accountId } = (req.query || {}) as { accountId?: string };
-    return { url: oauthStartUrl(op, req.user.workspaceId, req.user.userId, accountId || null) };
+    return { url: oauthStartUrl(op, req.user.workspaceId, req.user.userId, accountId || null, returnOrigin(req)) };
   });
 
   app.get('/api/v1/planner/oauth/:platform/callback', async (req, reply) => {
     const { platform } = req.params as { platform: string };
     const q = req.query as { code?: string; state?: string; error?: string; error_description?: string };
+    // Send the user back to the address they started from (signed into the state, so it can't be forged).
+    let ret = '';
+    try {
+      const o = (app.jwt.verify(String(q.state || '')) as any)?.o;
+      if (typeof o === 'string' && /^http:\/\/[\w.-]+(:\d{1,5})?$/.test(o)) ret = o;
+    } catch {
+      /* expired or missing state: stay on this origin */
+    }
     const back = (params: Record<string, string>) =>
-      reply.code(302).header('Location', `/workspace?${new URLSearchParams({ tab: 'calendar', ...params })}`).send();
+      reply.code(302).header('Location', `${ret}/workspace?${new URLSearchParams({ tab: 'calendar', ...params })}`).send();
     const name = OAUTH[platform as OAuthPlatform]?.name || platform;
     if (q.error) return back({ connect_error: q.error === 'access_denied' ? `You cancelled the ${name} sign-in.` : `${name} said: ${q.error_description || q.error}` });
     if (oauthProvider(platform) !== platform) return back({ connect_error: `${name} sign-in isn’t configured.` });
@@ -358,7 +386,7 @@ export async function plannerRoutes(app: FastifyInstance) {
       if (!platform) throw new PlannerError('Unsupported platform');
       const mode = acc.mode === 'live' ? 'live' : 'sandbox';
       const op = oauthProvider(platform);
-      if (mode === 'live' && op) return { redirect: oauthStartUrl(op, req.user.workspaceId, req.user.userId, acc.id) };
+      if (mode === 'live' && op) return { redirect: oauthStartUrl(op, req.user.workspaceId, req.user.userId, acc.id, returnOrigin(req)) };
       let res;
       try {
         res = await getAdapter(platform, mode).connect({ mode, username: acc.username });
