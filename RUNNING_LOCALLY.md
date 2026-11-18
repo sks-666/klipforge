@@ -63,11 +63,19 @@ In local dev, the app automatically logs in with the seeded demo account:
 - **Password**: `password123`
 - **Workspace**: `Alex's Workspace` (`ws_demo`) — configured with **∞ Unlimited credits**
 
+### Unlimited access (on by default)
+
+A fresh install from the GitHub repo has **unlimited access out of the box**, so you don't need to configure anything:
+
+- Every workspace (the demo one and every account you register) is put on the **Business** plan with **∞ credits**: no watermark, 4K export, and every feature unlocked (scheduling, brand kit, sharing, API access, team invites).
+- This is applied when the API starts, so existing local databases are upgraded too.
+- To bring back normal plans and credits (for example on a public, paid server), start the API with `UNLIMITED_ACCESS=false`.
+
 ### Accounts: register, log in, log out
 
 | Page | What it does |
 | :--- | :--- |
-| `/register` | Create an account (name, email, password ≥ 8 chars with a letter and a number). You get your own **Free** workspace with 47 credits. |
+| `/register` | Create an account (name, email, password ≥ 8 chars with a letter and a number). You get your own workspace with unlimited access (Business plan, ∞ credits). With `UNLIMITED_ACCESS=false` it starts on the **Free** plan with 47 credits instead. |
 | `/login` | Log in with email + password, or click **Continue with demo account**. |
 | Avatar menu → **Log out** | Signs out and returns to `/login`. Demo auto-login stays off until you log in again. |
 | `/settings/profile` | Change your name and password. |

@@ -402,6 +402,26 @@ const DATE_FIELDS = new Set([
 
 const BIGINT_FIELDS = new Set(['storage_bytes', 'bytes']);
 
+// Mirrors unlimitedAccessEnabled() in credits.ts (kept here to avoid a circular import).
+function unlimitedAccessOn(): boolean {
+  if (process.env.NODE_ENV === 'test') return false;
+  return String(process.env.UNLIMITED_ACCESS ?? 'true').toLowerCase() !== 'false';
+}
+
+/** Unlimited access mode: every workspace on the Business plan with unlimited credits. */
+function applyUnlimitedAccess(currentStore: Store): boolean {
+  if (!unlimitedAccessOn()) return false;
+  const st = currentStore as any;
+  const top = Array.isArray(st.plans) ? st.plans.find((p: any) => p.id === 'plan_business') : null;
+  if (!top || !Array.isArray(st.workspaces)) return false;
+  let changed = false;
+  for (const ws of st.workspaces) {
+    if (ws.plan_id !== top.id) { ws.plan_id = top.id; changed = true; }
+    if (Number(ws.credits_balance || 0) < 999999999) { ws.credits_balance = 999999999; changed = true; }
+  }
+  return changed;
+}
+
 function loadStoreFromDisk(): Store {
   try {
     if (fs.existsSync(DB_FILE_PATH)) {
@@ -420,10 +440,13 @@ function loadStoreFromDisk(): Store {
         const demoWs = Array.isArray(parsed.workspaces)
           ? parsed.workspaces.find((w: any) => w.id === 'ws_demo')
           : null;
+        let changed = false;
         if (demoWs && Number(demoWs.credits_balance || 0) < 999999999) {
           demoWs.credits_balance = 999999999;
-          saveStoreToDisk(parsed as Store);
+          changed = true;
         }
+        if (applyUnlimitedAccess(parsed as Store)) changed = true;
+        if (changed) saveStoreToDisk(parsed as Store);
         return parsed as Store;
       }
     }
@@ -431,6 +454,7 @@ function loadStoreFromDisk(): Store {
     console.warn('Could not load local-db.json, initializing fresh store:', err);
   }
   const initial = createSeededStore();
+  applyUnlimitedAccess(initial);
   saveStoreToDisk(initial);
   return initial;
 }

@@ -2,7 +2,7 @@ import { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import crypto from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
-import { isUnlimitedCreditsWorkspace } from '../lib/credits';
+import { isUnlimitedCreditsWorkspace, unlimitedAccessEnabled, UNLIMITED_CREDITS_BALANCE, UNLIMITED_PLAN_ID } from '../lib/credits';
 import { requireAuth } from '../middleware/auth';
 
 // ---------------------------------------------------------------------------
@@ -147,6 +147,12 @@ export async function authRoutes(app: FastifyInstance) {
     }
 
     const freePlan = await prisma.plan.findUniqueOrThrow({ where: { key: 'free' } });
+    // Unlimited access mode (default for self-hosted installs): start on the top plan.
+    const unlimited = unlimitedAccessEnabled();
+    const startPlan = unlimited
+      ? (await prisma.plan.findUnique({ where: { id: UNLIMITED_PLAN_ID } })) || freePlan
+      : freePlan;
+    const startCredits = unlimited ? UNLIMITED_CREDITS_BALANCE : freePlan.credits;
 
     const result = await prisma.$transaction(async (tx: any) => {
       const user = await tx.user.create({
@@ -163,8 +169,8 @@ export async function authRoutes(app: FastifyInstance) {
       const workspace = await tx.workspace.create({
         data: {
           name: `${body.name}'s Workspace`,
-          plan_id: freePlan.id,
-          credits_balance: freePlan.credits,
+          plan_id: startPlan.id,
+          credits_balance: startCredits,
           storage_bytes: BigInt(0),
           logo_url: null,
           memberships: {
@@ -176,9 +182,9 @@ export async function authRoutes(app: FastifyInstance) {
           },
           credit_ledger: {
             create: {
-              delta: freePlan.credits,
-              balance_after: freePlan.credits,
-              reason: 'Starter Free Plan Allocation',
+              delta: startCredits,
+              balance_after: startCredits,
+              reason: unlimited ? 'Unlimited access (self-hosted)' : 'Starter Free Plan Allocation',
               ref_type: 'subscription',
               ref_id: 'starter_grant',
             },

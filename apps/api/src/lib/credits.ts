@@ -2,8 +2,23 @@ import { prisma } from './prisma';
 
 export const UNLIMITED_CREDITS_BALANCE = 999_999_999;
 
+/**
+ * Self-hosted "unlimited access" mode: on by default, so a fresh install from the
+ * repo has no credit limits, watermarks or locked plan features for any account.
+ * Set UNLIMITED_ACCESS=false to bring back normal plans and credits (e.g. for a
+ * hosted/paid deployment). Tests always run with real limits.
+ */
+export function unlimitedAccessEnabled(): boolean {
+  if (process.env.NODE_ENV === 'test') return false;
+  return String(process.env.UNLIMITED_ACCESS ?? 'true').toLowerCase() !== 'false';
+}
+
+/** Plan given to every workspace while unlimited access is on. */
+export const UNLIMITED_PLAN_ID = 'plan_business';
+
 export function isUnlimitedCreditsWorkspace(workspaceId: string): boolean {
-  return workspaceId === 'ws_demo' && process.env.NODE_ENV !== 'test';
+  if (process.env.NODE_ENV === 'test') return false;
+  return unlimitedAccessEnabled() || workspaceId === 'ws_demo';
 }
 
 export class InsufficientCreditsError extends Error {
