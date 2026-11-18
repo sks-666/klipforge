@@ -1,0 +1,28 @@
+# Dependencies and builds
+node_modules/
+dist/
+*.tsbuildinfo
+
+# Secrets
+.env
+.env.*
+!.env.example
+
+# Local data: videos, uploads, vault, and the local JSON database (holds accounts)
+apps/api/storage/
+apps/api/prisma/local-db.json
+apps/api/prisma/*.bak*
+
+# Downloaded / compiled helper binaries
+apps/api/bin/
+
+# Backups and experiments
+*.bak*
+*.bak-*
+.backup-*/
+apps/web/ipproof-attempt/
+
+# OS / editor
+.DS_Store
+*.log
+__pycache__/

@@ -1,0 +1,23 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "klipforge-api",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev:api"],
+      "port": 4000
+    },
+    {
+      "name": "klipforge-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev:web"],
+      "port": 5173
+    },
+    {
+      "name": "klipforge-web-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["--workspace=apps/web", "exec", "--", "vite", "--port", "5174", "--strictPort"],
+      "port": 5174
+    }
+  ]
+}

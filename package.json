@@ -1,0 +1,14 @@
+{
+  "name": "klipforge-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:api": "npm --workspace=apps/api run dev",
+    "dev:web": "npm --workspace=apps/web run dev",
+    "db:push": "npm --workspace=apps/api run db:push",
+    "db:seed": "npm --workspace=apps/api run db:seed",
+    "test": "npm --workspace=apps/api run test"
+  }
+}

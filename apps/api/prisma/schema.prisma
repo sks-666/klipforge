@@ -1,0 +1,478 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  owner
+  admin
+  editor
+  viewer
+}
+
+enum ProjectStatus {
+  queued
+  downloading
+  transcribing
+  analyzing
+  rendering
+  done
+  failed
+}
+
+enum AssetKind {
+  source_video
+  clip
+  final
+  image
+  audio
+  font
+  logo
+  broll
+}
+
+enum ClipKind {
+  ai
+  manual
+}
+
+enum BrandAssetType {
+  logo
+  color
+  font
+  image
+  outro
+  subtitle_style
+  text_style
+}
+
+enum ShareAccess {
+  restricted
+  anyone_view
+}
+
+enum AiModelKind {
+  video
+  image
+  motion
+}
+
+model User {
+  id            String       @id @default(cuid())
+  email         String       @unique
+  password_hash String?
+  name          String
+  avatar_url    String?
+  locale        String       @default("en")
+  tz            String       @default("UTC")
+  created_at    DateTime     @default(now())
+
+  memberships   Membership[]
+  projects      Project[]
+  generations   Generation[]
+  api_keys      ApiKey[]
+  popups_seen   PopupSeen[]
+
+  @@map("users")
+}
+
+model Plan {
+  id              String      @id @default(cuid())
+  key             String      @unique // "free", "creator", "business"
+  name            String
+  price_monthly   Float       // e.g. 0, 29, 39
+  price_yearly    Float       // e.g. 0, 174 ($14.5/mo), 234 ($19.5/mo)
+  credits         Int         // starter 47, or yearly/monthly allocation
+  features_json   Json        // { watermark: bool, maxRes: "720p"|"4k", brandKit: bool, apiAccess: bool, schedulePosts: bool, storageGb: int, shareProject: bool }
+  seat_price      Float       @default(0)
+  social_limit    Int         @default(1)
+  retention_days  Int         @default(3) // 3 for free, 0 (unlimited) for paid
+  max_res         String      @default("720p")
+
+  workspaces      Workspace[]
+
+  @@map("plans")
+}
+
+model Workspace {
+  id                 String         @id @default(cuid())
+  name               String
+  logo_url           String?
+  plan_id            String
+  stripe_customer_id String?
+  credits_balance    Int            @default(47)
+  storage_bytes      BigInt         @default(0)
+  created_at         DateTime       @default(now())
+
+  plan               Plan           @relation(fields: [plan_id], references: [id])
+  memberships        Membership[]
+  invitations        Invitation[]
+  folders            Folder[]
+  projects           Project[]
+  assets             Asset[]
+  templates          Template[]
+  brand_assets       BrandAsset[]
+  social_accounts    SocialAccount[]
+  generations        Generation[]
+  credit_ledger      CreditLedger[]
+  api_keys           ApiKey[]
+  webhooks           Webhook[]
+
+  @@map("workspaces")
+}
+
+model Membership {
+  workspace_id String
+  user_id      String
+  role         Role      @default(viewer)
+  seat_active  Boolean   @default(true)
+
+  workspace    Workspace @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+  user         User      @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@id([workspace_id, user_id])
+  @@map("memberships")
+}
+
+model Invitation {
+  id           String    @id @default(cuid())
+  workspace_id String
+  email        String
+  role         Role      @default(editor)
+  token        String    @unique
+  expires_at   DateTime
+  accepted_at  DateTime?
+  created_at   DateTime  @default(now())
+
+  workspace    Workspace @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+
+  @@index([workspace_id])
+  @@map("invitations")
+}
+
+model Folder {
+  id           String    @id @default(cuid())
+  workspace_id String
+  parent_id    String?
+  name         String
+  created_at   DateTime  @default(now())
+
+  workspace    Workspace @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+  parent       Folder?   @relation("FolderHierarchy", fields: [parent_id], references: [id])
+  children     Folder[]  @relation("FolderHierarchy")
+  projects     Project[]
+
+  @@index([workspace_id])
+  @@map("folders")
+}
+
+model Project {
+  id              String        @id @default(cuid())
+  workspace_id    String
+  folder_id       String?
+  name            String
+  source_type     Int           @default(1) // 1..14 per Public API spec
+  source_url      String?
+  source_asset_id String?
+  lang            String        @default("auto")
+  status          ProjectStatus @default(queued)
+  error_code      Int?
+  options_json    Json          @default("{}")
+  expires_at      DateTime?
+  deleted_at      DateTime?
+  created_by      String
+  created_at      DateTime      @default(now())
+  updated_at      DateTime      @updatedAt
+
+  workspace       Workspace     @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+  folder          Folder?       @relation(fields: [folder_id], references: [id], onDelete: SetNull)
+  creator         User          @relation(fields: [created_by], references: [id])
+  transcripts     Transcript[]
+  clips           Clip[]
+  share_links     ShareLink[]
+  shares          Share[]
+
+  @@index([workspace_id, deleted_at])
+  @@map("projects")
+}
+
+model Asset {
+  id           String    @id @default(cuid())
+  workspace_id String
+  kind         AssetKind
+  storage_key  String
+  mime         String
+  bytes        BigInt    @default(0)
+  duration_ms  Int?
+  width        Int?
+  height       Int?
+  sha256       String?
+  created_at   DateTime  @default(now())
+
+  workspace    Workspace @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+  final_videos FinalVideo[]
+
+  @@index([workspace_id, kind])
+  @@map("assets")
+}
+
+model Transcript {
+  id         String  @id @default(cuid())
+  project_id String
+  lang       String
+  words_json Json    // [{w, start_ms, end_ms, speaker, conf}]
+
+  project    Project @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@map("transcripts")
+}
+
+model Clip {
+  id              String       @id @default(cuid())
+  project_id      String
+  version         Int          @default(1)
+  kind            ClipKind     @default(ai)
+  title           String
+  start_ms        Int
+  end_ms          Int
+  viral_score     Float        @default(0.0)
+  viral_reason    String?
+  topics_json     Json         @default("[]")
+  transcript_text String       @default("")
+  ratio           String       @default("9:16")
+  template_id     String?
+  edit_doc_json   Json         @default("{}")
+  stale           Boolean      @default(false)
+  starred         Boolean      @default(false)
+  disliked        Boolean      @default(false)
+  label_ready     Boolean      @default(false)
+  created_at      DateTime     @default(now())
+
+  project         Project      @relation(fields: [project_id], references: [id], onDelete: Cascade)
+  final_videos    FinalVideo[]
+
+  @@index([project_id])
+  @@map("clips")
+}
+
+model FinalVideo {
+  id            String       @id @default(cuid())
+  clip_id       String
+  asset_id      String
+  res           String       @default("720p")
+  status        String       @default("done")
+  render_job_id String?
+  expires_at    DateTime?
+  watermark     Boolean      @default(true)
+  created_at    DateTime     @default(now())
+
+  clip          Clip         @relation(fields: [clip_id], references: [id], onDelete: Cascade)
+  asset         Asset        @relation(fields: [asset_id], references: [id], onDelete: Cascade)
+  publish_jobs  PublishJob[]
+
+  @@map("final_videos")
+}
+
+model Template {
+  id               String    @id @default(cuid())
+  workspace_id     String
+  name             String
+  ratio            String    @default("9:16")
+  spec_json        Json
+  preview_asset_id String?
+  created_at       DateTime  @default(now())
+
+  workspace        Workspace @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+
+  @@map("templates")
+}
+
+model BrandAsset {
+  id           String         @id @default(cuid())
+  workspace_id String
+  type         BrandAssetType
+  data_json    Json
+  asset_id     String?
+  created_at   DateTime       @default(now())
+
+  workspace    Workspace      @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+
+  @@map("brand_assets")
+}
+
+model SocialAccount {
+  id           String       @id @default(cuid())
+  workspace_id String
+  platform     String       // tiktok, youtube, instagram, facebook, twitter, linkedin
+  external_id  String
+  username     String
+  page         String?
+  profile_pic  String?
+  token_enc    String
+  refresh_enc  String?
+  expires_at   DateTime?
+  status       String       @default("active") // active | expired | locked
+  created_at   DateTime     @default(now())
+
+  workspace    Workspace    @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+  publish_jobs PublishJob[]
+
+  @@index([workspace_id])
+  @@map("social_accounts")
+}
+
+model PublishJob {
+  id               String        @id @default(cuid())
+  final_video_id   String
+  social_account_id String
+  caption          String?
+  title            String?
+  scheduled_at     DateTime
+  status           String        @default("scheduled") // scheduled, publishing, published, failed
+  platform_post_id String?
+  error            String?
+  created_at       DateTime      @default(now())
+
+  final_video      FinalVideo    @relation(fields: [final_video_id], references: [id], onDelete: Cascade)
+  social_account   SocialAccount @relation(fields: [social_account_id], references: [id], onDelete: Cascade)
+  post_metrics     PostMetric[]
+
+  @@map("publish_jobs")
+}
+
+model PostMetric {
+  id             String     @id @default(cuid())
+  publish_job_id String
+  views          Int        @default(0)
+  likes          Int        @default(0)
+  comments       Int        @default(0)
+  shares         Int        @default(0)
+  fetched_at     DateTime   @default(now())
+
+  publish_job    PublishJob @relation(fields: [publish_job_id], references: [id], onDelete: Cascade)
+
+  @@map("post_metrics")
+}
+
+model ShareLink {
+  id         String      @id @default(cuid())
+  project_id String
+  access     ShareAccess @default(anyone_view)
+  token      String      @unique
+
+  project    Project     @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@map("share_links")
+}
+
+model Share {
+  id            String   @id @default(cuid())
+  project_id    String
+  user_or_email String
+  role          Role     @default(viewer)
+  viewed_at     DateTime @default(now())
+
+  project       Project  @relation(fields: [project_id], references: [id], onDelete: Cascade)
+
+  @@map("shares")
+}
+
+model AiModel {
+  id                 String      @id @default(cuid())
+  kind               AiModelKind
+  provider           String
+  name               String
+  badge              String?     // "New", "Audio", etc.
+  description        String
+  base_credits       Int
+  params_schema_json Json
+  enabled            Boolean     @default(true)
+
+  generations        Generation[]
+
+  @@map("ai_models")
+}
+
+model Generation {
+  id              String      @id @default(cuid())
+  workspace_id    String
+  user_id         String
+  kind            AiModelKind
+  model_id        String
+  prompt          String
+  params_json     Json        @default("{}")
+  refs_json       Json        @default("{}")
+  status          String      @default("queued")
+  progress        Int         @default(0)
+  credits_cost    Int
+  result_asset_id String?
+  error           String?
+  created_at      DateTime    @default(now())
+
+  workspace       Workspace   @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+  user            User        @relation(fields: [user_id], references: [id])
+  model           AiModel     @relation(fields: [model_id], references: [id])
+
+  @@index([workspace_id])
+  @@map("generations")
+}
+
+model CreditLedger {
+  id            String    @id @default(cuid())
+  workspace_id  String
+  delta         Int       // positive for grant/refund, negative for usage
+  balance_after Int
+  reason        String
+  ref_type      String?   // "project", "generation", "subscription", "referral"
+  ref_id        String?
+  created_at    DateTime  @default(now())
+
+  workspace     Workspace @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+
+  @@index([workspace_id, created_at])
+  @@map("credit_ledger")
+}
+
+model ApiKey {
+  id           String    @id @default(cuid())
+  workspace_id String
+  hash         String    @unique
+  prefix       String
+  created_by   String
+  last_used_at DateTime?
+  revoked_at   DateTime?
+  created_at   DateTime  @default(now())
+
+  workspace    Workspace @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+  creator      User      @relation(fields: [created_by], references: [id])
+
+  @@index([workspace_id])
+  @@map("api_keys")
+}
+
+model Webhook {
+  id           String    @id @default(cuid())
+  workspace_id String
+  url          String
+  secret       String
+  created_at   DateTime  @default(now())
+
+  workspace    Workspace @relation(fields: [workspace_id], references: [id], onDelete: Cascade)
+
+  @@map("webhooks")
+}
+
+model PopupSeen {
+  user_id   String
+  popup_key String
+  seen_at   DateTime @default(now())
+
+  user      User     @relation(fields: [user_id], references: [id], onDelete: Cascade)
+
+  @@id([user_id, popup_key])
+  @@map("popups_seen")
+}
