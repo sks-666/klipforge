@@ -13,9 +13,6 @@ apps/api/storage/
 apps/api/prisma/local-db.json
 apps/api/prisma/*.bak*
 
-# Downloaded / compiled helper binaries
-apps/api/bin/
-
 # Backups and experiments
 *.bak*
 *.bak-*
